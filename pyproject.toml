@@ -1,5 +1,5 @@
 [project]
-name = "pydiffvg"
+name = "easydiffvg"
 version = "0.1.0"
 description = "Pure PyTorch differentiable vector graphics - drop-in replacement for diffvg"
 readme = "README.md"
