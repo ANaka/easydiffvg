@@ -4,8 +4,20 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "cssutils>=2.11.1",
+    "matplotlib>=3.10.8",
+    "scikit-image>=0.26.0",
+    "torch>=2.10.0",
+]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "cmake>=4.2.1",
+    "pytest>=9.0.2",
+    "svgpathtools>=1.7.2",
+]
