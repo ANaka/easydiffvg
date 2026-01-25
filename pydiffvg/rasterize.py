@@ -1,6 +1,6 @@
 """Core rasterization logic for pydiffvg."""
 
-from enum import Enum
+from enum import IntEnum
 
 import torch
 
@@ -25,12 +25,26 @@ from pydiffvg.utils.winding import (
 from pydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
 
 
-class PixelFilter(Enum):
-    """Pixel filter for antialiasing."""
+class FilterType(IntEnum):
+    """Pixel filter type for antialiasing."""
 
-    BOX = "box"
-    TENT = "tent"
-    GAUSSIAN = "gaussian"
+    box = 0
+    tent = 1
+    radial_paraboloid = 2
+    hann = 3
+
+
+class PixelFilter:
+    """Pixel filter for antialiasing.
+
+    Args:
+        type: Filter type (FilterType enum)
+        radius: Filter radius (default 0.5)
+    """
+
+    def __init__(self, type=FilterType.box, radius=torch.tensor(0.5)):
+        self.type = type
+        self.radius = radius
 
 
 def sample_color(

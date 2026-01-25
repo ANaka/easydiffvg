@@ -168,3 +168,109 @@ class TestApiCompatibility:
         """Verify all color classes are exported."""
         for name in ["SolidColor", "LinearGradient", "RadialGradient"]:
             assert hasattr(pydiffvg, name)
+
+    def test_filter_type_enum_exists(self):
+        """Verify FilterType enum is exported."""
+        assert hasattr(pydiffvg, "FilterType")
+        assert pydiffvg.FilterType.box == 0
+        assert pydiffvg.FilterType.tent == 1
+        assert pydiffvg.FilterType.radial_paraboloid == 2
+        assert pydiffvg.FilterType.hann == 3
+
+    def test_output_type_enum_exists(self):
+        """Verify OutputType enum is exported."""
+        assert hasattr(pydiffvg, "OutputType")
+        assert pydiffvg.OutputType.color == 1
+        assert pydiffvg.OutputType.sdf == 2
+
+    def test_pixel_filter_exists(self):
+        """Verify PixelFilter class is exported."""
+        assert hasattr(pydiffvg, "PixelFilter")
+        filt = pydiffvg.PixelFilter(type=pydiffvg.FilterType.box, radius=torch.tensor(0.5))
+        assert filt.type == pydiffvg.FilterType.box
+
+    def test_from_svg_path_exists(self):
+        """Verify from_svg_path function is exported."""
+        assert hasattr(pydiffvg, "from_svg_path")
+        assert callable(pydiffvg.from_svg_path)
+
+    def test_print_timing_exists(self):
+        """Verify print_timing and set_print_timing are exported."""
+        assert hasattr(pydiffvg, "print_timing")
+        assert hasattr(pydiffvg, "set_print_timing")
+        assert callable(pydiffvg.set_print_timing)
+
+    def test_serialize_scene_exists(self):
+        """Verify RenderFunction.serialize_scene exists."""
+        assert hasattr(pydiffvg.RenderFunction, "serialize_scene")
+        assert callable(pydiffvg.RenderFunction.serialize_scene)
+
+    def test_shape_group_accepts_raw_tensor_color(self, device):
+        """ShapeGroup accepts raw tensor for fill_color (original API)."""
+        group = pydiffvg.ShapeGroup(
+            shape_ids=torch.tensor([0], dtype=torch.int32, device=device),
+            fill_color=torch.tensor([1.0, 0.0, 0.0, 1.0], device=device),
+        )
+        # Should be automatically wrapped in SolidColor
+        assert isinstance(group.fill_color, pydiffvg.SolidColor)
+
+    def test_serialize_scene_and_apply(self, device):
+        """Test original API pattern: serialize_scene + apply."""
+        circle = pydiffvg.Circle(
+            radius=torch.tensor(20.0, device=device),
+            center=torch.tensor([32.0, 32.0], device=device),
+        )
+        group = pydiffvg.ShapeGroup(
+            shape_ids=torch.tensor([0], dtype=torch.int32, device=device),
+            fill_color=torch.tensor([1.0, 0.0, 0.0, 1.0], device=device),
+        )
+
+        # Original API pattern
+        args = pydiffvg.RenderFunction.serialize_scene(64, 64, [circle], [group])
+        img = pydiffvg.RenderFunction.apply(64, 64, 2, 2, 0, None, *args)
+
+        assert img.shape == (64, 64, 4)
+        # Center should be red
+        assert img[32, 32, 0] > 0.5
+
+    def test_shape_constructor_matches_original(self, device):
+        """Verify shape constructors match original API."""
+        # Circle: radius, center, stroke_width, id
+        circle = pydiffvg.Circle(
+            radius=torch.tensor(10.0),
+            center=torch.tensor([50.0, 50.0]),
+            stroke_width=torch.tensor(2.0),
+            id="circle1",
+        )
+        assert circle.radius.item() == 10.0
+        assert circle.stroke_width.item() == 2.0
+        assert circle.id == "circle1"
+
+        # Path: num_control_points, points, is_closed, stroke_width, id, use_distance_approx
+        path = pydiffvg.Path(
+            num_control_points=torch.tensor([0, 0]),
+            points=torch.tensor([[0.0, 0.0], [100.0, 0.0], [100.0, 100.0]]),
+            is_closed=True,
+            stroke_width=torch.tensor(1.0),
+            id="path1",
+            use_distance_approx=True,
+        )
+        assert path.is_closed
+        assert path.use_distance_approx
+        assert path.id == "path1"
+
+    def test_shape_group_constructor_matches_original(self, device):
+        """Verify ShapeGroup constructor matches original API."""
+        # Original order: shape_ids, fill_color, use_even_odd_rule, stroke_color, shape_to_canvas, id
+        group = pydiffvg.ShapeGroup(
+            shape_ids=torch.tensor([0]),
+            fill_color=torch.tensor([1.0, 0.0, 0.0, 1.0]),
+            use_even_odd_rule=False,
+            stroke_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
+            shape_to_canvas=torch.eye(3) * 2,
+            id="group1",
+        )
+        assert group.use_even_odd_rule is False
+        assert isinstance(group.fill_color, pydiffvg.SolidColor)
+        assert isinstance(group.stroke_color, pydiffvg.SolidColor)
+        assert group.id == "group1"
