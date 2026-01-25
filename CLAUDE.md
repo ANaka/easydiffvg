@@ -11,12 +11,17 @@ The `diffvg/` directory contains the original diffvg repository as a reference i
 ## Build & Development Commands
 
 ```bash
-# Install in development mode (using uv, as indicated by .python-version)
-uv pip install -e .
-
-# Install dependencies
+# Install dependencies and project in development mode
 uv sync
+
+# Add new dependencies (always use uv add, never pip)
+uv add <package>
+
+# Add dev dependencies
+uv add --dev <package>
 ```
+
+**Important**: Always use `uv` for dependency management. Avoid `pip` entirely.
 
 ## Architecture
 

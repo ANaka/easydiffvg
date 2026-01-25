@@ -27,8 +27,11 @@ from easydiffvg.shapes import Circle, Ellipse, Path, Polygon, Rect, Shape
 from easydiffvg.groups import ShapeGroup
 from easydiffvg.color import Color, LinearGradient, RadialGradient, SolidColor
 from easydiffvg.render import RenderFunction, render
+from easydiffvg.render_diff import render_differentiable
 from easydiffvg.rasterize import PixelFilter
 from easydiffvg.svg import parse_svg, save_svg
+from easydiffvg.device import get_device, get_use_gpu, set_device, set_use_gpu
+from easydiffvg.image import imwrite
 
 __version__ = "0.1.0"
 
@@ -50,8 +53,16 @@ __all__ = [
     # Rendering
     "RenderFunction",
     "render",
+    "render_differentiable",
     "PixelFilter",
     # SVG I/O
     "parse_svg",
     "save_svg",
+    # Device management
+    "get_device",
+    "get_use_gpu",
+    "set_device",
+    "set_use_gpu",
+    # Image I/O
+    "imwrite",
 ]
