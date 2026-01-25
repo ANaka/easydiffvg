@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 import torch
 
-from easydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
-from easydiffvg.utils.bezier import cubic_bounding_box
+from pydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg.utils.bezier import cubic_bounding_box
 
 
 @dataclass

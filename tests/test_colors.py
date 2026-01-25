@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from easydiffvg import SolidColor, LinearGradient, RadialGradient
+from pydiffvg import SolidColor, LinearGradient, RadialGradient
 
 
 class TestSolidColor:

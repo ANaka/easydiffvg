@@ -12,9 +12,9 @@ import math
 
 import torch
 
-from easydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
-from easydiffvg.groups import ShapeGroup
-from easydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
+from pydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg.groups import ShapeGroup
+from pydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
 
 
 def render_differentiable(

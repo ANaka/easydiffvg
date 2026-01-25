@@ -2,7 +2,7 @@
 
 import torch
 
-from easydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
+from pydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
 
 
 def winding_number_line(

@@ -1,4 +1,4 @@
-"""Bezier curve utilities for easydiffvg."""
+"""Bezier curve utilities for pydiffvg."""
 
 import torch
 

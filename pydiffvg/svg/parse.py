@@ -1,4 +1,4 @@
-"""SVG parsing for easydiffvg."""
+"""SVG parsing for pydiffvg."""
 
 import re
 import xml.etree.ElementTree as ET
@@ -6,16 +6,16 @@ from pathlib import Path
 
 import torch
 
-from easydiffvg.shapes import Circle, Ellipse, Rect, Polygon, Path as PathShape
-from easydiffvg.groups import ShapeGroup
-from easydiffvg.color import SolidColor, LinearGradient, RadialGradient
+from pydiffvg.shapes import Circle, Ellipse, Rect, Polygon, Path as PathShape
+from pydiffvg.groups import ShapeGroup
+from pydiffvg.color import SolidColor, LinearGradient, RadialGradient
 
 
 def parse_svg(
     filename: str,
     device: torch.device | str = "cpu",
 ) -> tuple[int, int, list, list]:
-    """Parse an SVG file into easydiffvg primitives.
+    """Parse an SVG file into pydiffvg primitives.
 
     Args:
         filename: Path to SVG file

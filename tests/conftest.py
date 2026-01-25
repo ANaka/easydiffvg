@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for easydiffvg tests."""
+"""Shared pytest fixtures for pydiffvg tests."""
 
 import pytest
 import torch

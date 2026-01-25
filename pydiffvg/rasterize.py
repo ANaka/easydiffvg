@@ -1,14 +1,14 @@
-"""Core rasterization logic for easydiffvg."""
+"""Core rasterization logic for pydiffvg."""
 
-from enum import Enum
+from enum import IntEnum
 
 import torch
 
-from easydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
-from easydiffvg.groups import ShapeGroup
-from easydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
-from easydiffvg.bvh import build_bvh, query_bvh, compute_shape_bbox
-from easydiffvg.utils.distance import (
+from pydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg.groups import ShapeGroup
+from pydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
+from pydiffvg.bvh import build_bvh, query_bvh, compute_shape_bbox
+from pydiffvg.utils.distance import (
     signed_distance_circle,
     signed_distance_ellipse,
     signed_distance_rect,
@@ -16,21 +16,35 @@ from easydiffvg.utils.distance import (
     distance_to_quadratic_bezier,
     distance_to_cubic_bezier,
 )
-from easydiffvg.utils.winding import (
+from pydiffvg.utils.winding import (
     winding_number_line,
     winding_number_quadratic,
     winding_number_cubic,
     winding_number_polygon,
 )
-from easydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
+from pydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
 
 
-class PixelFilter(Enum):
-    """Pixel filter for antialiasing."""
+class FilterType(IntEnum):
+    """Pixel filter type for antialiasing."""
 
-    BOX = "box"
-    TENT = "tent"
-    GAUSSIAN = "gaussian"
+    box = 0
+    tent = 1
+    radial_paraboloid = 2
+    hann = 3
+
+
+class PixelFilter:
+    """Pixel filter for antialiasing.
+
+    Args:
+        type: Filter type (FilterType enum)
+        radius: Filter radius (default 0.5)
+    """
+
+    def __init__(self, type=FilterType.box, radius=torch.tensor(0.5)):
+        self.type = type
+        self.radius = radius
 
 
 def sample_color(
@@ -404,6 +418,239 @@ def _get_device_dtype(shapes: list[Shape]) -> tuple[torch.device, torch.dtype]:
         return first_shape.p_min.device, first_shape.p_min.dtype
     else:  # Polygon or Path
         return first_shape.points.device, first_shape.points.dtype
+
+
+def compute_sdf_at_point(
+    point: torch.Tensor,
+    shapes: list[Shape],
+    shape_groups: list[ShapeGroup],
+) -> torch.Tensor:
+    """Compute signed distance field at a single point.
+
+    Returns the minimum signed distance to any shape boundary.
+    Negative inside shapes, positive outside.
+
+    Args:
+        point: Query point [2]
+        shapes: List of shapes
+        shape_groups: List of shape groups
+
+    Returns:
+        Signed distance (scalar tensor)
+    """
+    device = point.device
+    dtype = point.dtype
+    min_sdf = torch.tensor(float("inf"), device=device, dtype=dtype)
+
+    for group in shape_groups:
+        # Get transform
+        shape_to_canvas = group.shape_to_canvas.to(device)
+        canvas_to_shape = torch.linalg.inv(shape_to_canvas)
+
+        # Transform point to shape coordinates
+        point_h = torch.cat([point, torch.ones(1, device=device, dtype=dtype)])
+        point_shape = (canvas_to_shape @ point_h)[:2]
+
+        for shape_idx_tensor in group.shape_ids:
+            shape_idx = int(shape_idx_tensor.item())
+            shape = shapes[shape_idx]
+
+            if isinstance(shape, Circle):
+                center = shape.center.to(device)
+                radius = shape.radius.to(device)
+                sdf = signed_distance_circle(point_shape, center, radius)
+            elif isinstance(shape, Ellipse):
+                center = shape.center.to(device)
+                radius = shape.radius.to(device)
+                sdf = signed_distance_ellipse(point_shape, center, radius)
+            elif isinstance(shape, Rect):
+                p_min = shape.p_min.to(device)
+                p_max = shape.p_max.to(device)
+                sdf = signed_distance_rect(point_shape, p_min, p_max)
+            elif isinstance(shape, Polygon):
+                # For polygon, compute distance to edges and use winding for sign
+                sdf = _signed_distance_polygon(point_shape, shape, device)
+            elif isinstance(shape, Path):
+                # For path, compute distance to curves and use winding for sign
+                sdf = _signed_distance_path(point_shape, shape, device)
+            else:
+                continue
+
+            min_sdf = torch.minimum(min_sdf, sdf)
+
+    return min_sdf
+
+
+def _signed_distance_polygon(point: torch.Tensor, polygon: Polygon, device=None) -> torch.Tensor:
+    """Compute signed distance from point to polygon."""
+    if device is None:
+        device = point.device
+    # Compute unsigned distance to edges
+    points = polygon.points.to(device)
+    n = points.shape[0]
+    min_dist = torch.tensor(float("inf"), device=device, dtype=point.dtype)
+
+    n_edges = n if polygon.is_closed else n - 1
+    for i in range(n_edges):
+        p0 = points[i]
+        p1 = points[(i + 1) % n]
+        dist = distance_to_line_segment(point, p0, p1)
+        min_dist = torch.minimum(min_dist, dist)
+
+    # Determine sign using winding number
+    if polygon.is_closed:
+        winding = winding_number_polygon(point, points)
+        # Inside if winding != 0, use negative distance
+        sign = torch.where(winding != 0, torch.tensor(-1.0, device=device), torch.tensor(1.0, device=device))
+        return min_dist * sign
+    else:
+        return min_dist  # Open polygon has no inside
+
+
+def _signed_distance_path(point: torch.Tensor, path: Path, device=None) -> torch.Tensor:
+    """Compute signed distance from point to path."""
+    if device is None:
+        device = point.device
+    min_dist = torch.tensor(float("inf"), device=device, dtype=point.dtype)
+
+    points = path.points.to(device)
+    num_control = path.num_control_points.to(device)
+
+    idx = 0
+    for i in range(len(num_control)):
+        n_ctrl = int(num_control[i].item())
+
+        if n_ctrl == 0:
+            # Line segment
+            p0 = points[idx]
+            p1 = points[idx + 1] if idx + 1 < len(points) else points[0]
+            dist = distance_to_line_segment(point, p0, p1)
+            min_dist = torch.minimum(min_dist, dist)
+            idx += 1
+
+        elif n_ctrl == 1:
+            # Quadratic bezier
+            p0 = points[idx]
+            p1 = points[idx + 1]
+            p2 = points[idx + 2] if idx + 2 < len(points) else points[0]
+            dist = distance_to_quadratic_bezier(point, p0, p1, p2)
+            min_dist = torch.minimum(min_dist, dist)
+            idx += 2
+
+        elif n_ctrl == 2:
+            # Cubic bezier
+            p0 = points[idx]
+            p1 = points[idx + 1]
+            p2 = points[idx + 2]
+            p3 = points[idx + 3] if idx + 3 < len(points) else points[0]
+            dist = distance_to_cubic_bezier(point, p0, p1, p2, p3)
+            min_dist = torch.minimum(min_dist, dist)
+            idx += 3
+
+    # Determine sign using winding number for closed paths
+    if path.is_closed:
+        winding = _compute_path_winding_on_device(point, path, device)
+        sign = torch.where(winding != 0, torch.tensor(-1.0, device=device), torch.tensor(1.0, device=device))
+        return min_dist * sign
+    else:
+        return min_dist
+
+
+def _compute_path_winding_on_device(point: torch.Tensor, path: Path, device) -> torch.Tensor:
+    """Compute winding number for a point with respect to a path, with device handling."""
+    winding = torch.zeros((), dtype=point.dtype, device=device)
+
+    points = path.points.to(device)
+    num_control = path.num_control_points.to(device)
+    n_segments = len(num_control)
+
+    idx = 0
+    for i in range(n_segments):
+        n_ctrl = int(num_control[i].item())
+
+        if n_ctrl == 0:
+            # Line segment
+            p0 = points[idx]
+            p1 = points[idx + 1] if idx + 1 < len(points) else points[0]
+            winding = winding + winding_number_line(point, p0, p1)
+            idx += 1
+
+        elif n_ctrl == 1:
+            # Quadratic bezier
+            p0 = points[idx]
+            p1 = points[idx + 1]
+            p2 = points[idx + 2] if idx + 2 < len(points) else points[0]
+            winding = winding + winding_number_quadratic(point, p0, p1, p2)
+            idx += 2
+
+        elif n_ctrl == 2:
+            # Cubic bezier
+            p0 = points[idx]
+            p1 = points[idx + 1]
+            p2 = points[idx + 2]
+            p3 = points[idx + 3] if idx + 3 < len(points) else points[0]
+            winding = winding + winding_number_cubic(point, p0, p1, p2, p3)
+            idx += 3
+
+    # Handle closing segment if needed
+    if path.is_closed and idx < len(points):
+        winding = winding + winding_number_line(point, points[idx], points[0])
+
+    return winding
+
+
+def rasterize_sdf(
+    canvas_width: int,
+    canvas_height: int,
+    shapes: list[Shape],
+    shape_groups: list[ShapeGroup],
+) -> torch.Tensor:
+    """Rasterize signed distance field.
+
+    Args:
+        canvas_width: Output image width
+        canvas_height: Output image height
+        shapes: List of shapes
+        shape_groups: List of shape groups
+
+    Returns:
+        SDF tensor [H, W, 1]
+    """
+    device, dtype = _get_device_dtype(shapes)
+    sdf = torch.zeros(canvas_height, canvas_width, 1, device=device, dtype=dtype)
+
+    for y in range(canvas_height):
+        for x in range(canvas_width):
+            point = torch.tensor([x + 0.5, y + 0.5], device=device, dtype=dtype)
+            sdf[y, x, 0] = compute_sdf_at_point(point, shapes, shape_groups)
+
+    return sdf
+
+
+def compute_sdf_at_positions(
+    positions: torch.Tensor,
+    shapes: list[Shape],
+    shape_groups: list[ShapeGroup],
+) -> torch.Tensor:
+    """Compute SDF at arbitrary positions.
+
+    Args:
+        positions: Query positions [N, 2]
+        shapes: List of shapes
+        shape_groups: List of shape groups
+
+    Returns:
+        SDF values [N, 1]
+    """
+    n = positions.shape[0]
+    device = positions.device
+    dtype = positions.dtype
+    sdf = torch.zeros(n, 1, device=device, dtype=dtype)
+
+    for i in range(n):
+        sdf[i, 0] = compute_sdf_at_point(positions[i], shapes, shape_groups)
+
+    return sdf
 
 
 def rasterize_pixel(

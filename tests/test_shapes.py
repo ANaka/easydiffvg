@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from easydiffvg import Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg import Circle, Ellipse, Rect, Polygon, Path, from_svg_path
 
 
 class TestCircle:
@@ -226,3 +226,67 @@ class TestPath:
 
         assert hasattr(path, "use_distance_approx")
         assert path.use_distance_approx is False
+
+
+class TestFromSvgPath:
+    def test_from_svg_path_line(self):
+        """Convert SVG line path to Path object."""
+        paths = from_svg_path("M 0 0 L 100 100")
+
+        assert len(paths) == 1
+        path = paths[0]
+        assert isinstance(path, Path)
+        assert path.points.shape[0] == 2  # 2 points for line
+        assert not path.is_closed
+
+    def test_from_svg_path_closed(self):
+        """Convert closed SVG path to Path object."""
+        paths = from_svg_path("M 0 0 L 100 0 L 100 100 Z")
+
+        assert len(paths) == 1
+        path = paths[0]
+        assert path.is_closed
+
+    def test_from_svg_path_quadratic(self):
+        """Convert quadratic bezier to Path object."""
+        paths = from_svg_path("M 0 0 Q 50 100 100 0")
+
+        assert len(paths) == 1
+        path = paths[0]
+        assert path.num_control_points[0] == 1  # quadratic has 1 control point
+
+    def test_from_svg_path_cubic(self):
+        """Convert cubic bezier to Path object."""
+        paths = from_svg_path("M 0 0 C 25 100 75 100 100 0")
+
+        assert len(paths) == 1
+        path = paths[0]
+        assert path.num_control_points[0] == 2  # cubic has 2 control points
+
+    def test_from_svg_path_with_transform(self):
+        """Apply transform when converting SVG path."""
+        # Translation matrix: translate by (10, 20)
+        transform = torch.tensor([
+            [1.0, 0.0, 10.0],
+            [0.0, 1.0, 20.0],
+            [0.0, 0.0, 1.0],
+        ])
+        paths = from_svg_path("M 0 0 L 100 0", shape_to_canvas=transform)
+
+        assert len(paths) == 1
+        path = paths[0]
+        # First point should be translated to (10, 20)
+        assert torch.allclose(path.points[0], torch.tensor([10.0, 20.0]), atol=1e-5)
+
+    def test_from_svg_path_empty(self):
+        """Empty path string returns empty list."""
+        paths = from_svg_path("")
+        assert len(paths) == 0
+
+    def test_from_svg_path_force_close(self):
+        """Force close an open path."""
+        paths = from_svg_path("M 0 0 L 100 0 L 100 100", force_close=True)
+
+        assert len(paths) == 1
+        path = paths[0]
+        assert path.is_closed

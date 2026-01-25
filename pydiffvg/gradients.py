@@ -14,7 +14,7 @@ import math
 
 import torch
 
-from easydiffvg.shapes import Circle, Ellipse, Path, Polygon, Rect, Shape
+from pydiffvg.shapes import Circle, Ellipse, Path, Polygon, Rect, Shape
 
 
 def compute_boundary_samples(
@@ -452,7 +452,7 @@ def compute_shape_gradients(
     shape_colors: dict[int, torch.Tensor] = {}
     for group in shape_groups:
         if group.fill_color is not None:
-            from easydiffvg.color import SolidColor
+            from pydiffvg.color import SolidColor
             if isinstance(group.fill_color, SolidColor):
                 color = group.fill_color.color
             else:
