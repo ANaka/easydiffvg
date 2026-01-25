@@ -38,6 +38,7 @@ from pydiffvg.rasterize import PixelFilter, FilterType
 from pydiffvg.svg import parse_svg, save_svg
 from pydiffvg.device import get_device, get_use_gpu, set_device, set_use_gpu
 from pydiffvg.image import imwrite
+from pydiffvg.optimize_svg import SvgOptimizationSettings, OptimizableSvg
 
 __version__ = "0.1.0"
 
@@ -77,4 +78,7 @@ __all__ = [
     "set_use_gpu",
     # Image I/O
     "imwrite",
+    # SVG Optimization
+    "SvgOptimizationSettings",
+    "OptimizableSvg",
 ]
