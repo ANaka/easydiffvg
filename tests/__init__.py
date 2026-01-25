@@ -1,1 +1,1 @@
-# easydiffvg tests
+# pydiffvg tests

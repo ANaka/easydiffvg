@@ -4,9 +4,9 @@ from typing import Any
 
 import torch
 
-from easydiffvg.shapes import Shape
-from easydiffvg.groups import ShapeGroup
-from easydiffvg.rasterize import rasterize, PixelFilter
+from pydiffvg.shapes import Shape
+from pydiffvg.groups import ShapeGroup
+from pydiffvg.rasterize import rasterize, PixelFilter
 
 
 class RenderFunction(torch.autograd.Function):
@@ -121,7 +121,7 @@ def render(
 
     Example:
         >>> import torch
-        >>> from easydiffvg import render, Circle, ShapeGroup, SolidColor
+        >>> from pydiffvg import render, Circle, ShapeGroup, SolidColor
         >>>
         >>> circle = Circle(
         ...     center=torch.tensor([32.0, 32.0]),

@@ -7,7 +7,7 @@ import pytest
 import torch
 import numpy as np
 
-import easydiffvg
+import pydiffvg
 
 
 class TestDeviceUtils:
@@ -15,32 +15,32 @@ class TestDeviceUtils:
 
     def test_get_device_returns_device(self):
         """get_device returns a torch.device."""
-        device = easydiffvg.get_device()
+        device = pydiffvg.get_device()
         assert isinstance(device, torch.device)
 
     def test_get_use_gpu_returns_bool(self):
         """get_use_gpu returns a boolean."""
-        use_gpu = easydiffvg.get_use_gpu()
+        use_gpu = pydiffvg.get_use_gpu()
         assert isinstance(use_gpu, bool)
 
     def test_set_use_gpu_to_false(self):
         """set_use_gpu(False) switches to CPU."""
-        original = easydiffvg.get_use_gpu()
+        original = pydiffvg.get_use_gpu()
         try:
-            easydiffvg.set_use_gpu(False)
-            assert easydiffvg.get_use_gpu() is False
-            assert easydiffvg.get_device().type == 'cpu'
+            pydiffvg.set_use_gpu(False)
+            assert pydiffvg.get_use_gpu() is False
+            assert pydiffvg.get_device().type == 'cpu'
         finally:
-            easydiffvg.set_use_gpu(original)
+            pydiffvg.set_use_gpu(original)
 
     def test_set_device(self):
         """set_device changes the device."""
-        original = easydiffvg.get_device()
+        original = pydiffvg.get_device()
         try:
-            easydiffvg.set_device(torch.device('cpu'))
-            assert easydiffvg.get_device().type == 'cpu'
+            pydiffvg.set_device(torch.device('cpu'))
+            assert pydiffvg.get_device().type == 'cpu'
         finally:
-            easydiffvg.set_device(original)
+            pydiffvg.set_device(original)
 
 
 class TestImageUtils:
@@ -51,7 +51,7 @@ class TestImageUtils:
         img = torch.rand(32, 32, 4)
         output_file = tmp_path / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file))
+        pydiffvg.imwrite(img, str(output_file))
 
         assert output_file.exists()
 
@@ -60,7 +60,7 @@ class TestImageUtils:
         img = np.random.rand(32, 32, 4).astype(np.float32)
         output_file = tmp_path / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file))
+        pydiffvg.imwrite(img, str(output_file))
 
         assert output_file.exists()
 
@@ -69,7 +69,7 @@ class TestImageUtils:
         img = torch.rand(32, 32)
         output_file = tmp_path / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file))
+        pydiffvg.imwrite(img, str(output_file))
 
         assert output_file.exists()
 
@@ -78,7 +78,7 @@ class TestImageUtils:
         img = torch.rand(32, 32, 4)
         output_file = tmp_path / "subdir" / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file))
+        pydiffvg.imwrite(img, str(output_file))
 
         assert output_file.exists()
 
@@ -87,7 +87,7 @@ class TestImageUtils:
         img = torch.rand(32, 32, 4) * 10 - 5  # Values in [-5, 5]
         output_file = tmp_path / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file), normalize=True)
+        pydiffvg.imwrite(img, str(output_file), normalize=True)
 
         assert output_file.exists()
 
@@ -96,7 +96,7 @@ class TestImageUtils:
         img = torch.rand(32, 32, 3)
         output_file = tmp_path / "test.png"
 
-        easydiffvg.imwrite(img, str(output_file))
+        pydiffvg.imwrite(img, str(output_file))
 
         assert output_file.exists()
 
@@ -106,12 +106,12 @@ class TestApiExports:
 
     def test_device_functions_exported(self):
         """Device management functions are accessible."""
-        assert hasattr(easydiffvg, "get_device")
-        assert hasattr(easydiffvg, "get_use_gpu")
-        assert hasattr(easydiffvg, "set_device")
-        assert hasattr(easydiffvg, "set_use_gpu")
+        assert hasattr(pydiffvg, "get_device")
+        assert hasattr(pydiffvg, "get_use_gpu")
+        assert hasattr(pydiffvg, "set_device")
+        assert hasattr(pydiffvg, "set_use_gpu")
 
     def test_imwrite_exported(self):
-        """imwrite is accessible from easydiffvg."""
-        assert hasattr(easydiffvg, "imwrite")
-        assert callable(easydiffvg.imwrite)
+        """imwrite is accessible from pydiffvg."""
+        assert hasattr(pydiffvg, "imwrite")
+        assert callable(pydiffvg.imwrite)

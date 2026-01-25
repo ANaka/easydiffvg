@@ -1,7 +1,7 @@
 [project]
-name = "easydiffvg"
+name = "pydiffvg"
 version = "0.1.0"
-description = "Add your description here"
+description = "Pure PyTorch differentiable vector graphics - drop-in replacement for diffvg"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,6 +9,7 @@ dependencies = [
     "matplotlib>=3.10.8",
     "pillow>=12.1.0",
     "scikit-image>=0.26.0",
+    "svgpathtools>=1.7.2",
     "torch>=2.10.0",
 ]
 
@@ -16,9 +17,11 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["pydiffvg"]
+
 [tool.uv]
 dev-dependencies = [
     "cmake>=4.2.1",
     "pytest>=9.0.2",
-    "svgpathtools>=1.7.2",
 ]

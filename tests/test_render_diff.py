@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-import easydiffvg
-from easydiffvg import (
+import pydiffvg
+from pydiffvg import (
     Circle,
     Ellipse,
     Rect,
@@ -339,6 +339,6 @@ class TestApiExport:
     """Test that render_differentiable is properly exported."""
 
     def test_exported_from_package(self):
-        """render_differentiable should be accessible from easydiffvg."""
-        assert hasattr(easydiffvg, "render_differentiable")
-        assert callable(easydiffvg.render_differentiable)
+        """render_differentiable should be accessible from pydiffvg."""
+        assert hasattr(pydiffvg, "render_differentiable")
+        assert callable(pydiffvg.render_differentiable)

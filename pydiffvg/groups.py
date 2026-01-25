@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import torch
 
 if TYPE_CHECKING:
-    from easydiffvg.color import Color
+    from pydiffvg.color import Color
 
 
 @dataclass

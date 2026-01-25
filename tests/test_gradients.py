@@ -8,8 +8,8 @@ These tests verify the current state of gradient support.
 import pytest
 import torch
 
-import easydiffvg
-from easydiffvg import Circle, ShapeGroup, SolidColor, render
+import pydiffvg
+from pydiffvg import Circle, ShapeGroup, SolidColor, render
 
 
 class TestForwardPassWorks:

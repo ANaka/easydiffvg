@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from easydiffvg import Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg import Circle, Ellipse, Rect, Polygon, Path
 
 
 class TestCircle:

@@ -1,4 +1,4 @@
-"""Color types for easydiffvg."""
+"""Color types for pydiffvg."""
 
 from dataclasses import dataclass
 

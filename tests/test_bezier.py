@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from easydiffvg.utils.bezier import (
+from pydiffvg.utils.bezier import (
     evaluate_quadratic,
     evaluate_cubic,
     quadratic_to_cubic,

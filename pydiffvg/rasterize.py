@@ -1,14 +1,14 @@
-"""Core rasterization logic for easydiffvg."""
+"""Core rasterization logic for pydiffvg."""
 
 from enum import Enum
 
 import torch
 
-from easydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
-from easydiffvg.groups import ShapeGroup
-from easydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
-from easydiffvg.bvh import build_bvh, query_bvh, compute_shape_bbox
-from easydiffvg.utils.distance import (
+from pydiffvg.shapes import Shape, Circle, Ellipse, Rect, Polygon, Path
+from pydiffvg.groups import ShapeGroup
+from pydiffvg.color import Color, SolidColor, LinearGradient, RadialGradient
+from pydiffvg.bvh import build_bvh, query_bvh, compute_shape_bbox
+from pydiffvg.utils.distance import (
     signed_distance_circle,
     signed_distance_ellipse,
     signed_distance_rect,
@@ -16,13 +16,13 @@ from easydiffvg.utils.distance import (
     distance_to_quadratic_bezier,
     distance_to_cubic_bezier,
 )
-from easydiffvg.utils.winding import (
+from pydiffvg.utils.winding import (
     winding_number_line,
     winding_number_quadratic,
     winding_number_cubic,
     winding_number_polygon,
 )
-from easydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
+from pydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
 
 
 class PixelFilter(Enum):

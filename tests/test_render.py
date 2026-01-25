@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-import easydiffvg
-from easydiffvg import Circle, Rect, ShapeGroup, SolidColor, LinearGradient, render
+import pydiffvg
+from pydiffvg import Circle, Rect, ShapeGroup, SolidColor, LinearGradient, render
 
 
 class TestRenderBasic:
@@ -152,19 +152,19 @@ class TestRenderMultipleShapes:
 class TestApiCompatibility:
     def test_render_function_exists(self):
         """Verify render function is exported."""
-        assert hasattr(easydiffvg, "render")
-        assert callable(easydiffvg.render)
+        assert hasattr(pydiffvg, "render")
+        assert callable(pydiffvg.render)
 
     def test_render_function_class_exists(self):
         """Verify RenderFunction is exported."""
-        assert hasattr(easydiffvg, "RenderFunction")
+        assert hasattr(pydiffvg, "RenderFunction")
 
     def test_shape_classes_exist(self):
         """Verify all shape classes are exported."""
         for name in ["Circle", "Ellipse", "Path", "Polygon", "Rect"]:
-            assert hasattr(easydiffvg, name)
+            assert hasattr(pydiffvg, name)
 
     def test_color_classes_exist(self):
         """Verify all color classes are exported."""
         for name in ["SolidColor", "LinearGradient", "RadialGradient"]:
-            assert hasattr(easydiffvg, name)
+            assert hasattr(pydiffvg, name)

@@ -1,8 +1,8 @@
-"""Distance field utilities for easydiffvg."""
+"""Distance field utilities for pydiffvg."""
 
 import torch
 
-from easydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
+from pydiffvg.utils.bezier import evaluate_quadratic, evaluate_cubic
 
 
 def distance_to_line_segment(

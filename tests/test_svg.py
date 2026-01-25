@@ -6,8 +6,8 @@ from pathlib import Path
 
 import torch
 
-import easydiffvg
-from easydiffvg import (
+import pydiffvg
+from pydiffvg import (
     Circle,
     Rect,
     ShapeGroup,
@@ -169,11 +169,11 @@ class TestSvgRoundtrip:
 
 class TestApiExports:
     def test_parse_svg_exported(self):
-        """Verify parse_svg is exported from easydiffvg."""
-        assert hasattr(easydiffvg, "parse_svg")
-        assert callable(easydiffvg.parse_svg)
+        """Verify parse_svg is exported from pydiffvg."""
+        assert hasattr(pydiffvg, "parse_svg")
+        assert callable(pydiffvg.parse_svg)
 
     def test_save_svg_exported(self):
-        """Verify save_svg is exported from easydiffvg."""
-        assert hasattr(easydiffvg, "save_svg")
-        assert callable(easydiffvg.save_svg)
+        """Verify save_svg is exported from pydiffvg."""
+        assert hasattr(pydiffvg, "save_svg")
+        assert callable(pydiffvg.save_svg)

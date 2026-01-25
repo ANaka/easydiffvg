@@ -1,4 +1,4 @@
-"""Shape primitives for easydiffvg."""
+"""Shape primitives for pydiffvg."""
 
 from dataclasses import dataclass, field
 

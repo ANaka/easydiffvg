@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from easydiffvg import ShapeGroup, SolidColor, LinearGradient
+from pydiffvg import ShapeGroup, SolidColor, LinearGradient
 
 
 class TestShapeGroup:
