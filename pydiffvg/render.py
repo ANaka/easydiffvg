@@ -7,7 +7,7 @@ import torch
 
 from pydiffvg.shapes import Shape, Circle, Ellipse, Path, Polygon, Rect
 from pydiffvg.groups import ShapeGroup
-from pydiffvg.rasterize import rasterize, PixelFilter, FilterType
+from pydiffvg.rasterize import rasterize, rasterize_sdf, compute_sdf_at_positions, PixelFilter, FilterType
 from pydiffvg.color import LinearGradient, RadialGradient, SolidColor
 import pydiffvg
 
@@ -370,20 +370,31 @@ class RenderFunction(torch.autograd.Function):
         ctx.num_samples_y = num_samples_y
         ctx.background_image = background_image
         ctx.output_type = output_type
+        ctx.eval_positions = eval_positions
         ctx.args = args
 
-        # Perform rasterization
-        image = rasterize(
-            canvas_width,
-            canvas_height,
-            shapes,
-            shape_groups,
-            num_samples_x,
-            num_samples_y,
-            background_image,
-        )
+        # Perform rasterization based on output type
+        if output_type == OutputType.sdf:
+            # SDF output mode
+            if eval_positions.shape[0] > 0:
+                # Evaluate SDF at specific positions
+                result = compute_sdf_at_positions(eval_positions, shapes, shape_groups)
+            else:
+                # Render full SDF image
+                result = rasterize_sdf(canvas_width, canvas_height, shapes, shape_groups)
+        else:
+            # Color output mode (default)
+            result = rasterize(
+                canvas_width,
+                canvas_height,
+                shapes,
+                shape_groups,
+                num_samples_x,
+                num_samples_y,
+                background_image,
+            )
 
-        return image
+        return result
 
     @staticmethod
     def backward(ctx: Any, grad_output: torch.Tensor) -> tuple:

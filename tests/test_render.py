@@ -149,6 +149,64 @@ class TestRenderMultipleShapes:
         assert center[2] < 0.5  # Not blue
 
 
+
+class TestSdfOutput:
+    def test_sdf_output_mode(self, device):
+        """Render SDF instead of color image."""
+        circle = Circle(
+            radius=torch.tensor(20.0, device=device),
+            center=torch.tensor([32.0, 32.0], device=device),
+        )
+        group = ShapeGroup(
+            shape_ids=torch.tensor([0], dtype=torch.int32, device=device),
+            fill_color=SolidColor(
+                color=torch.tensor([1.0, 0.0, 0.0, 1.0], device=device)
+            ),
+        )
+
+        # Render SDF
+        args = pydiffvg.RenderFunction.serialize_scene(
+            64, 64, [circle], [group],
+            output_type=pydiffvg.OutputType.sdf
+        )
+        sdf = pydiffvg.RenderFunction.apply(64, 64, 2, 2, 0, None, *args)
+
+        assert sdf.shape == (64, 64, 1)
+        # Center should be inside (negative)
+        assert sdf[32, 32, 0] < 0
+        # Corner should be outside (positive)
+        assert sdf[0, 0, 0] > 0
+
+    def test_sdf_at_eval_positions(self, device):
+        """Evaluate SDF at specific positions."""
+        circle = Circle(
+            radius=torch.tensor(20.0, device=device),
+            center=torch.tensor([32.0, 32.0], device=device),
+        )
+        group = ShapeGroup(
+            shape_ids=torch.tensor([0], dtype=torch.int32, device=device),
+            fill_color=SolidColor(
+                color=torch.tensor([1.0, 0.0, 0.0, 1.0], device=device)
+            ),
+        )
+
+        # Evaluate at center and corner
+        eval_positions = torch.tensor([
+            [32.0, 32.0],  # center - should be inside
+            [0.0, 0.0],    # corner - should be outside
+        ], device=device)
+
+        args = pydiffvg.RenderFunction.serialize_scene(
+            64, 64, [circle], [group],
+            output_type=pydiffvg.OutputType.sdf,
+            eval_positions=eval_positions
+        )
+        sdf = pydiffvg.RenderFunction.apply(64, 64, 2, 2, 0, None, *args)
+
+        assert sdf.shape == (2, 1)
+        assert sdf[0, 0] < 0  # center inside
+        assert sdf[1, 0] > 0  # corner outside
+
 class TestApiCompatibility:
     def test_render_function_exists(self):
         """Verify render function is exported."""
