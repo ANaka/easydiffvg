@@ -73,6 +73,7 @@ def splat_render_cubics(
     canvas_size: int = 224,
     num_samples: int = 20,
     pixel_chunk_size: int = 2048,
+    opacities: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Render cubic Bezier strokes via Gaussian splatting.
 
@@ -80,10 +81,11 @@ def splat_render_cubics(
 
     Args:
         cubics: (B, num_strokes, 4, 2) cubic Bezier control points in [-1, 1].
-        stroke_widths: (B, num_strokes) stroke widths in pixels.
+        stroke_widths: (B, num_strokes) stroke width sigma in pixels.
         canvas_size: Output image resolution (square).
         num_samples: Number of sample points per Bezier curve.
         pixel_chunk_size: Pixels to process at once (memory control).
+        opacities: (B, num_strokes) per-stroke opacity in [0, 1]. Defaults to 1.
 
     Returns:
         (B, H, W) grayscale image. White background (1.0), black strokes (0.0).
@@ -119,6 +121,12 @@ def splat_render_cubics(
     # sigma_across from stroke width
     sigma_across = stroke_widths.unsqueeze(-1).expand(-1, -1, K)  # (B, num_strokes, K)
 
+    # Per-stroke opacity (expanded to per-Gaussian)
+    if opacities is not None:
+        opacity_per_gauss = opacities.unsqueeze(-1).expand(-1, -1, K)  # (B, num_strokes, K)
+    else:
+        opacity_per_gauss = torch.ones(B, num_strokes, K, device=device, dtype=dtype)
+
     # Precompute rotation and inverse variance terms
     cos_a = torch.cos(angles)
     sin_a = torch.sin(angles)
@@ -132,6 +140,7 @@ def splat_render_cubics(
     sin_flat = sin_a.reshape(B, G)
     inv_sa2_flat = inv_sa2.reshape(B, G)
     inv_sc2_flat = inv_sc2.reshape(B, G)
+    opacity_flat = opacity_per_gauss.reshape(B, G)
 
     # Create pixel grid
     py = torch.arange(H, device=device, dtype=dtype) + 0.5
@@ -146,7 +155,7 @@ def splat_render_cubics(
     adaptive_chunk = max(64, max_chunk_memory // (B * G * bytes_per_element * 6))
     chunk_size = min(pixel_chunk_size, adaptive_chunk, total_pixels)
 
-    def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f):
+    def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opacity_f):
         """Compute alpha for a chunk of pixels."""
         dx = chunk_pixels[None, None, :, 0] - means_f[:, :, None, 0]
         dy = chunk_pixels[None, None, :, 1] - means_f[:, :, None, 1]
@@ -154,6 +163,7 @@ def splat_render_cubics(
         d_across = -sin_f[:, :, None] * dx + cos_f[:, :, None] * dy
         mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
         alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
+        alpha = alpha * opacity_f[:, :, None]  # Apply per-stroke opacity
         return alpha.sum(dim=1)
 
     # Process in chunks with gradient checkpointing
@@ -163,7 +173,7 @@ def splat_render_cubics(
         chunk_pixels = pixels[start:end]
         chunk_out = checkpoint(
             _splat_chunk, chunk_pixels,
-            means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat,
+            means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat, opacity_flat,
             use_reentrant=False,
         )
         chunks.append(chunk_out)
@@ -250,23 +260,42 @@ class SplatRenderFunction:
         """
         all_cubics = []
         all_stroke_widths = []
+        all_opacities = []
 
-        for shape in shapes:
+        # Build shape_id -> group mapping for stroke colors
+        shape_id_to_group = {}
+        for group in shape_groups:
+            for sid in group.shape_ids:
+                shape_id_to_group[int(sid.item())] = group
+
+        for shape_idx, shape in enumerate(shapes):
             if hasattr(shape, 'num_control_points') and hasattr(shape, 'points'):
                 cubics = split_path_to_cubics(shape.points, shape.num_control_points)
                 all_cubics.append(cubics)
-                # Repeat stroke width for each cubic segment
                 num_segments = cubics.shape[0]
                 all_stroke_widths.extend([shape.stroke_width] * num_segments)
 
+                # Extract opacity from stroke_color alpha channel
+                group = shape_id_to_group.get(shape_idx)
+                opacity = torch.tensor(1.0)
+                if group is not None and hasattr(group, 'stroke_color') and group.stroke_color is not None:
+                    sc = group.stroke_color
+                    # Handle both raw tensor and SolidColor object
+                    if hasattr(sc, 'color'):
+                        sc = sc.color
+                    if isinstance(sc, torch.Tensor) and sc.numel() >= 4:
+                        opacity = sc[3]  # RGBA alpha
+                all_opacities.extend([opacity] * num_segments)
+
         if len(all_cubics) == 0:
-            return (canvas_width, canvas_height, None, None)
+            return (canvas_width, canvas_height, None, None, None)
 
         # Stack all cubics: (total_segments, 4, 2)
         all_cubics = torch.cat(all_cubics, dim=0)
         all_stroke_widths = torch.stack(all_stroke_widths)
+        all_opacities = torch.stack(all_opacities)
 
-        return (canvas_width, canvas_height, all_cubics, all_stroke_widths)
+        return (canvas_width, canvas_height, all_cubics, all_stroke_widths, all_opacities)
 
     @staticmethod
     def apply(
@@ -283,7 +312,7 @@ class SplatRenderFunction:
         Returns:
             (H, W, 4) RGBA tensor, values in [0, 1]
         """
-        canvas_width, canvas_height, all_cubics, all_stroke_widths = scene_args[:4]
+        canvas_width, canvas_height, all_cubics, all_stroke_widths, all_opacities = scene_args[:5]
 
         if all_cubics is None:
             return torch.ones(height, width, 4)
@@ -291,22 +320,26 @@ class SplatRenderFunction:
         # Ensure all tensors are on the same device
         device = all_cubics.device
         all_stroke_widths = all_stroke_widths.to(device)
+        all_opacities = all_opacities.to(device)
 
         # Normalize coordinates: [0, canvas_size] -> [-1, 1]
         scale = max(canvas_width, canvas_height)
         cubics_normalized = (all_cubics / scale) * 2.0 - 1.0
 
-        # Convert stroke widths to normalized space
-        stroke_widths_normalized = all_stroke_widths / scale * 2.0
+        # Stroke widths stay in pixel space (splat_render_cubics expects pixels)
+        # sigma_across = stroke_width / 2 for half-width Gaussian
+        stroke_widths_px = all_stroke_widths / 2.0
 
         # Add batch dimension: (1, num_segments, 4, 2)
         cubics_batched = cubics_normalized.unsqueeze(0)
-        widths_batched = stroke_widths_normalized.unsqueeze(0)
+        widths_batched = stroke_widths_px.unsqueeze(0)
+        opacities_batched = all_opacities.unsqueeze(0)
 
         # Render grayscale
         grayscale = splat_render_cubics(
             cubics_batched,
             widths_batched,
+            opacities=opacities_batched,
             canvas_size=max(width, height),
             num_samples=20,
         )  # (1, H, W)
