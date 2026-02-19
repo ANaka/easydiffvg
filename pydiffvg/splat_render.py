@@ -288,6 +288,10 @@ class SplatRenderFunction:
         if all_cubics is None:
             return torch.ones(height, width, 4)
 
+        # Ensure all tensors are on the same device
+        device = all_cubics.device
+        all_stroke_widths = all_stroke_widths.to(device)
+
         # Normalize coordinates: [0, canvas_size] -> [-1, 1]
         scale = max(canvas_width, canvas_height)
         cubics_normalized = (all_cubics / scale) * 2.0 - 1.0
