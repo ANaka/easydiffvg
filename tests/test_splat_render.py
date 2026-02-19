@@ -196,3 +196,9 @@ def test_splat_render_function_gradients():
 
     assert points.grad is not None
     assert points.grad.abs().sum() > 0
+
+
+def test_import_from_pydiffvg():
+    """SplatRenderFunction should be importable from pydiffvg."""
+    from pydiffvg import SplatRenderFunction
+    assert SplatRenderFunction is not None

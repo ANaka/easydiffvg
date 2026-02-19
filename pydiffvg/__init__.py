@@ -39,6 +39,7 @@ from pydiffvg.svg import parse_svg, save_svg
 from pydiffvg.device import get_device, get_use_gpu, set_device, set_use_gpu
 from pydiffvg.image import imwrite
 from pydiffvg.optimize_svg import SvgOptimizationSettings, OptimizableSvg
+from pydiffvg.splat_render import SplatRenderFunction, splat_render_cubics
 
 __version__ = "0.1.0"
 
@@ -60,6 +61,8 @@ __all__ = [
     "SolidColor",
     # Rendering
     "RenderFunction",
+    "SplatRenderFunction",
+    "splat_render_cubics",
     "render",
     "render_differentiable",
     "OutputType",
