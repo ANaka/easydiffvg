@@ -117,3 +117,82 @@ def test_split_path_with_lines():
 
     # Lines become degenerate cubics (control points on the line)
     assert cubics.shape == (3, 4, 2)
+
+
+def test_splat_render_function_interface():
+    """SplatRenderFunction should match RenderFunction interface."""
+    import pydiffvg
+    from pydiffvg.splat_render import SplatRenderFunction
+
+    # Create a simple path (single cubic stroke)
+    points = torch.tensor([
+        [50.0, 50.0],
+        [100.0, 50.0],
+        [100.0, 150.0],
+        [150.0, 150.0],
+    ])
+    path = pydiffvg.Path(
+        num_control_points=torch.tensor([2]),
+        points=points,
+        stroke_width=torch.tensor(3.0),
+        is_closed=False,
+    )
+    shape_group = pydiffvg.ShapeGroup(
+        shape_ids=torch.tensor([0]),
+        fill_color=None,
+        stroke_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
+
+    canvas_width, canvas_height = 224, 224
+
+    # Serialize and render
+    scene_args = SplatRenderFunction.serialize_scene(
+        canvas_width, canvas_height, [path], [shape_group]
+    )
+    img = SplatRenderFunction.apply(
+        canvas_width, canvas_height,
+        2, 2,  # num_samples_x, num_samples_y (ignored for splat)
+        0,     # seed (ignored)
+        None,  # background
+        *scene_args,
+    )
+
+    assert img.shape == (224, 224, 4)  # RGBA output
+    assert img.min() >= 0.0
+    assert img.max() <= 1.0
+
+
+def test_splat_render_function_gradients():
+    """Gradients should flow through SplatRenderFunction."""
+    import pydiffvg
+    from pydiffvg.splat_render import SplatRenderFunction
+
+    points = torch.tensor([
+        [50.0, 50.0],
+        [100.0, 50.0],
+        [100.0, 150.0],
+        [150.0, 150.0],
+    ], requires_grad=True)
+
+    path = pydiffvg.Path(
+        num_control_points=torch.tensor([2]),
+        points=points,
+        stroke_width=torch.tensor(3.0),
+        is_closed=False,
+    )
+    shape_group = pydiffvg.ShapeGroup(
+        shape_ids=torch.tensor([0]),
+        fill_color=None,
+        stroke_color=torch.tensor([0.0, 0.0, 0.0, 1.0]),
+    )
+
+    scene_args = SplatRenderFunction.serialize_scene(
+        128, 128, [path], [shape_group]
+    )
+    img = SplatRenderFunction.apply(128, 128, 2, 2, 0, None, *scene_args)
+
+    loss = img.mean()
+    loss.backward()
+
+    assert points.grad is not None
+    assert points.grad.abs().sum() > 0

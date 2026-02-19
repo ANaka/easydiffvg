@@ -228,3 +228,93 @@ def split_path_to_cubics(
         cubics.append(cubic)
 
     return torch.stack(cubics, dim=0)
+
+
+class SplatRenderFunction:
+    """Drop-in replacement for pydiffvg.RenderFunction using Bezier splatting.
+
+    Uses pure PyTorch operations, so gradients work on all GPU architectures.
+    """
+
+    @staticmethod
+    def serialize_scene(
+        canvas_width: int,
+        canvas_height: int,
+        shapes: list,
+        shape_groups: list,
+        **kwargs,  # Accept but ignore filter, output_type, etc.
+    ) -> tuple:
+        """Extract rendering data from pydiffvg shapes.
+
+        Returns a tuple that can be passed to apply().
+        """
+        from pydiffvg.shapes import Path
+
+        all_cubics = []
+        all_stroke_widths = []
+
+        for shape in shapes:
+            if isinstance(shape, Path):
+                cubics = split_path_to_cubics(shape.points, shape.num_control_points)
+                all_cubics.append(cubics)
+                # Repeat stroke width for each cubic segment
+                num_segments = cubics.shape[0]
+                all_stroke_widths.extend([shape.stroke_width] * num_segments)
+
+        if len(all_cubics) == 0:
+            return (canvas_width, canvas_height, None, None)
+
+        # Stack all cubics: (total_segments, 4, 2)
+        all_cubics = torch.cat(all_cubics, dim=0)
+        all_stroke_widths = torch.stack(all_stroke_widths)
+
+        return (canvas_width, canvas_height, all_cubics, all_stroke_widths)
+
+    @staticmethod
+    def apply(
+        width: int,
+        height: int,
+        num_samples_x: int,  # Ignored (for interface compatibility)
+        num_samples_y: int,  # Ignored
+        seed: int,           # Ignored
+        background_image,    # Ignored for now
+        *scene_args,
+    ) -> torch.Tensor:
+        """Render the scene to an RGBA image.
+
+        Returns:
+            (H, W, 4) RGBA tensor, values in [0, 1]
+        """
+        canvas_width, canvas_height, all_cubics, all_stroke_widths = scene_args[:4]
+
+        if all_cubics is None:
+            return torch.ones(height, width, 4)
+
+        # Normalize coordinates: [0, canvas_size] -> [-1, 1]
+        scale = max(canvas_width, canvas_height)
+        cubics_normalized = (all_cubics / scale) * 2.0 - 1.0
+
+        # Convert stroke widths to normalized space
+        stroke_widths_normalized = all_stroke_widths / scale * 2.0
+
+        # Add batch dimension: (1, num_segments, 4, 2)
+        cubics_batched = cubics_normalized.unsqueeze(0)
+        widths_batched = stroke_widths_normalized.unsqueeze(0)
+
+        # Render grayscale
+        grayscale = splat_render_cubics(
+            cubics_batched,
+            widths_batched,
+            canvas_size=max(width, height),
+            num_samples=20,
+        )  # (1, H, W)
+
+        # Crop to actual size if non-square
+        grayscale = grayscale[0, :height, :width]  # (H, W)
+
+        # Convert to RGBA
+        rgb = grayscale.unsqueeze(-1).expand(-1, -1, 3)  # (H, W, 3)
+        alpha = torch.ones_like(grayscale).unsqueeze(-1)  # (H, W, 1)
+        rgba = torch.cat([rgb, alpha], dim=-1)  # (H, W, 4)
+
+        return rgba
