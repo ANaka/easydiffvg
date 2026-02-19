@@ -248,13 +248,11 @@ class SplatRenderFunction:
 
         Returns a tuple that can be passed to apply().
         """
-        from pydiffvg.shapes import Path
-
         all_cubics = []
         all_stroke_widths = []
 
         for shape in shapes:
-            if isinstance(shape, Path):
+            if hasattr(shape, 'num_control_points') and hasattr(shape, 'points'):
                 cubics = split_path_to_cubics(shape.points, shape.num_control_points)
                 all_cubics.append(cubics)
                 # Repeat stroke width for each cubic segment
