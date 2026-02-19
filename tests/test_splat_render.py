@@ -66,3 +66,54 @@ def test_splat_render_gradient_flows():
 
     assert cubics.grad is not None
     assert cubics.grad.abs().sum() > 0, "Gradients should be non-zero"
+
+
+def test_split_path_to_cubics():
+    """Split a multi-segment path into individual cubics."""
+    from pydiffvg.splat_render import split_path_to_cubics
+
+    # Path with 2 cubic segments: [P0, C1, C2, P1, C3, C4, P2]
+    # num_control_points = [2, 2] means 2 control points per segment (cubic)
+    points = torch.tensor([
+        [0.0, 0.0],   # P0
+        [1.0, 0.0],   # C1
+        [2.0, 0.0],   # C2
+        [3.0, 0.0],   # P1
+        [4.0, 0.0],   # C3
+        [5.0, 0.0],   # C4
+        [6.0, 0.0],   # P2
+    ])
+    num_control_points = torch.tensor([2, 2])
+
+    cubics = split_path_to_cubics(points, num_control_points)
+
+    # Should produce 2 cubics, each with 4 control points
+    assert cubics.shape == (2, 4, 2)
+    # First cubic: P0, C1, C2, P1
+    assert torch.allclose(cubics[0, 0], torch.tensor([0.0, 0.0]))
+    assert torch.allclose(cubics[0, 3], torch.tensor([3.0, 0.0]))
+    # Second cubic: P1, C3, C4, P2
+    assert torch.allclose(cubics[1, 0], torch.tensor([3.0, 0.0]))
+    assert torch.allclose(cubics[1, 3], torch.tensor([6.0, 0.0]))
+
+
+def test_split_path_with_lines():
+    """Split a path with line segments (0 control points)."""
+    from pydiffvg.splat_render import split_path_to_cubics
+
+    # Path: line, cubic, line
+    # Points: P0, P1, C1, C2, P2, P3
+    points = torch.tensor([
+        [0.0, 0.0],   # P0
+        [1.0, 0.0],   # P1 (end of line)
+        [1.5, 0.5],   # C1
+        [2.5, 0.5],   # C2
+        [3.0, 0.0],   # P2 (end of cubic)
+        [4.0, 0.0],   # P3 (end of line)
+    ])
+    num_control_points = torch.tensor([0, 2, 0])
+
+    cubics = split_path_to_cubics(points, num_control_points)
+
+    # Lines become degenerate cubics (control points on the line)
+    assert cubics.shape == (3, 4, 2)

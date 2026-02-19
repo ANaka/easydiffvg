@@ -173,3 +173,58 @@ def splat_render_cubics(
     result = 1.0 - output.clamp(0.0, 1.0)
 
     return result
+
+
+def split_path_to_cubics(
+    points: torch.Tensor,
+    num_control_points: torch.Tensor,
+) -> torch.Tensor:
+    """Split a multi-segment pydiffvg Path into individual cubic Beziers.
+
+    Converts lines (0 ctrl pts) and quadratics (1 ctrl pt) to cubics (3 ctrl pts).
+
+    Args:
+        points: (N, 2) all points in the path
+        num_control_points: (num_segments,) control points per segment
+
+    Returns:
+        (num_segments, 4, 2) cubic Bezier control points
+    """
+    cubics = []
+    point_idx = 0
+
+    for seg_idx, n_ctrl in enumerate(num_control_points):
+        n_ctrl = int(n_ctrl.item())
+
+        p0 = points[point_idx]
+
+        if n_ctrl == 0:
+            # Line segment: P0 -> P1
+            p3 = points[point_idx + 1]
+            # Convert to cubic: control points at 1/3 and 2/3
+            p1 = p0 + (p3 - p0) / 3.0
+            p2 = p0 + 2.0 * (p3 - p0) / 3.0
+            point_idx += 1
+
+        elif n_ctrl == 1:
+            # Quadratic: P0, C, P2 -> Cubic: P0, P0+2/3*(C-P0), P2+2/3*(C-P2), P2
+            c = points[point_idx + 1]
+            p3 = points[point_idx + 2]
+            p1 = p0 + 2.0 / 3.0 * (c - p0)
+            p2 = p3 + 2.0 / 3.0 * (c - p3)
+            point_idx += 2
+
+        elif n_ctrl == 2:
+            # Already cubic: P0, C1, C2, P3
+            p1 = points[point_idx + 1]
+            p2 = points[point_idx + 2]
+            p3 = points[point_idx + 3]
+            point_idx += 3
+
+        else:
+            raise ValueError(f"Unsupported num_control_points: {n_ctrl}")
+
+        cubic = torch.stack([p0, p1, p2, p3], dim=0)
+        cubics.append(cubic)
+
+    return torch.stack(cubics, dim=0)
