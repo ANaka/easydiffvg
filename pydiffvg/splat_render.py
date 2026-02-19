@@ -156,7 +156,7 @@ def splat_render_cubics(
     chunk_size = min(pixel_chunk_size, adaptive_chunk, total_pixels)
 
     def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opacity_f):
-        """Compute alpha for a chunk of pixels."""
+        """Compute combined alpha for a chunk of pixels using over compositing."""
         dx = chunk_pixels[None, None, :, 0] - means_f[:, :, None, 0]
         dy = chunk_pixels[None, None, :, 1] - means_f[:, :, None, 1]
         d_along = cos_f[:, :, None] * dx + sin_f[:, :, None] * dy
@@ -164,7 +164,10 @@ def splat_render_cubics(
         mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
         alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
         alpha = alpha * opacity_f[:, :, None]  # Apply per-stroke opacity
-        return alpha.sum(dim=1)
+        # Alpha compositing: combined = 1 - prod(1 - alpha_i)
+        # This gives natural overlap behavior instead of saturation
+        transmittance = (1.0 - alpha.clamp(0.0, 1.0)).prod(dim=1)
+        return 1.0 - transmittance  # (B, num_pixels)
 
     # Process in chunks with gradient checkpointing
     chunks = []
