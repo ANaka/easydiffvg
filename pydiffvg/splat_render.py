@@ -65,3 +65,111 @@ def _evaluate_bezier_tangent(control_points: torch.Tensor, t: torch.Tensor) -> t
     d2 = t * t
 
     return 3.0 * (d0 * (p1 - p0) + d1 * (p2 - p1) + d2 * (p3 - p2))
+
+
+def splat_render_cubics(
+    cubics: torch.Tensor,
+    stroke_widths: torch.Tensor,
+    canvas_size: int = 224,
+    num_samples: int = 20,
+    pixel_chunk_size: int = 2048,
+) -> torch.Tensor:
+    """Render cubic Bezier strokes via Gaussian splatting.
+
+    Pure PyTorch, fully differentiable, batched.
+
+    Args:
+        cubics: (B, num_strokes, 4, 2) cubic Bezier control points in [-1, 1].
+        stroke_widths: (B, num_strokes) stroke widths in pixels.
+        canvas_size: Output image resolution (square).
+        num_samples: Number of sample points per Bezier curve.
+        pixel_chunk_size: Pixels to process at once (memory control).
+
+    Returns:
+        (B, H, W) grayscale image. White background (1.0), black strokes (0.0).
+    """
+    B, num_strokes, _, _ = cubics.shape
+    device = cubics.device
+    dtype = cubics.dtype
+    H = W = canvas_size
+    K = num_samples
+
+    # Sample points and tangents along curves
+    t_vals = torch.linspace(0, 1, K, device=device, dtype=dtype)
+    positions = _evaluate_bezier(cubics, t_vals)  # (B, num_strokes, K, 2)
+    tangents = _evaluate_bezier_tangent(cubics, t_vals)
+
+    # Convert from [-1, 1] to pixel coordinates
+    means = (positions + 1.0) / 2.0 * canvas_size  # (B, num_strokes, K, 2)
+
+    # Compute rotation angles from tangents
+    angles = torch.atan2(tangents[..., 1], tangents[..., 0])  # (B, num_strokes, K)
+
+    # Compute sigma_along (half distance between consecutive samples)
+    diffs = means[:, :, 1:, :] - means[:, :, :-1, :]
+    dists = torch.norm(diffs, dim=-1)  # (B, num_strokes, K-1)
+
+    sigma_along = torch.zeros(B, num_strokes, K, device=device, dtype=dtype)
+    sigma_along[:, :, 1:] += dists
+    sigma_along[:, :, :-1] += dists
+    sigma_along[:, :, 1:-1] /= 2.0
+    sigma_along = sigma_along * 0.5
+    sigma_along = sigma_along.clamp(min=0.1)
+
+    # sigma_across from stroke width
+    sigma_across = stroke_widths.unsqueeze(-1).expand(-1, -1, K)  # (B, num_strokes, K)
+
+    # Precompute rotation and inverse variance terms
+    cos_a = torch.cos(angles)
+    sin_a = torch.sin(angles)
+    inv_sa2 = 1.0 / (sigma_along * sigma_along + 1e-8)
+    inv_sc2 = 1.0 / (sigma_across * sigma_across + 1e-8)
+
+    # Flatten for efficient computation
+    G = num_strokes * K
+    means_flat = means.reshape(B, G, 2)
+    cos_flat = cos_a.reshape(B, G)
+    sin_flat = sin_a.reshape(B, G)
+    inv_sa2_flat = inv_sa2.reshape(B, G)
+    inv_sc2_flat = inv_sc2.reshape(B, G)
+
+    # Create pixel grid
+    py = torch.arange(H, device=device, dtype=dtype) + 0.5
+    px = torch.arange(W, device=device, dtype=dtype) + 0.5
+    grid_y, grid_x = torch.meshgrid(py, px, indexing="ij")
+    pixels = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+    total_pixels = pixels.shape[0]
+
+    # Adaptive chunk size for memory efficiency
+    bytes_per_element = 4 if dtype == torch.float32 else 2
+    max_chunk_memory = 512 * 1024 * 1024
+    adaptive_chunk = max(64, max_chunk_memory // (B * G * bytes_per_element * 6))
+    chunk_size = min(pixel_chunk_size, adaptive_chunk, total_pixels)
+
+    def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f):
+        """Compute alpha for a chunk of pixels."""
+        dx = chunk_pixels[None, None, :, 0] - means_f[:, :, None, 0]
+        dy = chunk_pixels[None, None, :, 1] - means_f[:, :, None, 1]
+        d_along = cos_f[:, :, None] * dx + sin_f[:, :, None] * dy
+        d_across = -sin_f[:, :, None] * dx + cos_f[:, :, None] * dy
+        mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
+        alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
+        return alpha.sum(dim=1)
+
+    # Process in chunks with gradient checkpointing
+    chunks = []
+    for start in range(0, total_pixels, chunk_size):
+        end = min(start + chunk_size, total_pixels)
+        chunk_pixels = pixels[start:end]
+        chunk_out = checkpoint(
+            _splat_chunk, chunk_pixels,
+            means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat,
+            use_reentrant=False,
+        )
+        chunks.append(chunk_out)
+
+    output = torch.cat(chunks, dim=1)
+    output = output.reshape(B, H, W)
+    result = 1.0 - output.clamp(0.0, 1.0)
+
+    return result
