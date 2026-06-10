@@ -163,6 +163,11 @@ def splat_render_cubics(
         d_across = -sin_f[:, :, None] * dx + cos_f[:, :, None] * dy
         mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
         alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
+        # Hard cutoff beyond the clamp radius (~4.5 sigma): clamping alone
+        # leaves an exp(-10) alpha floor on EVERY pixel for EVERY gaussian,
+        # which composites into a visible gray background wash at scale
+        # (e.g. 40k gaussians -> (1 - exp(-10))^40k ~ 0.2 background).
+        alpha = alpha * (mahal_sq < 20.0)
         alpha = alpha * opacity_f[:, :, None]  # Apply per-stroke opacity
         # Alpha compositing: combined = 1 - prod(1 - alpha_i)
         # This gives natural overlap behavior instead of saturation
