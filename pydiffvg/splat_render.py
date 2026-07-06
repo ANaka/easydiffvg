@@ -211,6 +211,202 @@ def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opac
     return 1.0 - transmittance  # (B, num_pixels)
 
 
+# --------------------------------------------------------------------------
+# Tile-culled splatting (tiling="tiles")
+#
+# The dense path evaluates every gaussian against every pixel even though the
+# hard cutoff zeroes everything beyond mahal_sq >= 20 (~4.5 sigma). The tiled
+# path splits the render region into fixed-size tiles, computes a conservative
+# axis-aligned bounding box per gaussian from the same cutoff, and evaluates
+# each gaussian only against the pixels of the tiles its box overlaps. Because
+# the compositor 1 - prod(1 - alpha) is an order-independent product, the
+# per-pixel combination can be accumulated as sum(log1p(-alpha)) with
+# scatter-add (no sorting, no segmenting), then 1 - exp(.) at the end —
+# mathematically identical, differentiable through gather/scatter.
+# --------------------------------------------------------------------------
+
+# Must match the cutoff literals inside _splat_chunk and _splat_tile_chunk.
+_MAHAL_SQ_CUTOFF = 20.0
+
+# tiling="auto" uses tiles at or above this per-image gaussian count
+# (num_strokes * num_samples). Set from the measured dense/tiled crossover in
+# benchmarks/bench_splat_tiling.py on an RTX 5090 at canvas 384.
+_TILING_AUTO_THRESHOLD_G = 1024  # provisional; finalized by benchmark
+
+
+def _splat_tile_chunk(
+    pair_gauss, pair_tile_x, pair_tile_y, pair_b,
+    means_bg, cos_bg, sin_bg, inv_sa2_bg, inv_sc2_bg, opacity_bg,
+    off_x_f, off_y_f, off_x_i, off_y_i,
+    x0, y0, tile_size, Hp, Wp, batch,
+):
+    """Log-transmittance contribution of a chunk of (gaussian, tile) pairs.
+
+    Evaluates each pair's gaussian against its tile's tile_size^2 pixels
+    (same math as _splat_chunk, including the hard cutoff) and scatter-adds
+    log1p(-alpha) into a flat (batch * Hp * Wp) buffer.
+    """
+    mx = means_bg[pair_gauss, 0].unsqueeze(1)
+    my = means_bg[pair_gauss, 1].unsqueeze(1)
+    cos_p = cos_bg[pair_gauss].unsqueeze(1)
+    sin_p = sin_bg[pair_gauss].unsqueeze(1)
+    inv_sa2_p = inv_sa2_bg[pair_gauss].unsqueeze(1)
+    inv_sc2_p = inv_sc2_bg[pair_gauss].unsqueeze(1)
+    opacity_p = opacity_bg[pair_gauss].unsqueeze(1)
+
+    # Pixel centers of each pair's tile, in canvas coordinates.
+    px = x0 + (pair_tile_x * tile_size).to(off_x_f.dtype).unsqueeze(1) + off_x_f + 0.5
+    py = y0 + (pair_tile_y * tile_size).to(off_y_f.dtype).unsqueeze(1) + off_y_f + 0.5
+
+    dx = px - mx
+    dy = py - my
+    d_along = cos_p * dx + sin_p * dy
+    d_across = -sin_p * dx + cos_p * dy
+    mahal_sq = d_along.square() * inv_sa2_p + d_across.square() * inv_sc2_p
+    alpha = torch.exp(-0.5 * mahal_sq.clamp(max=_MAHAL_SQ_CUTOFF))
+    alpha = alpha * (mahal_sq < _MAHAL_SQ_CUTOFF)  # same hard cutoff as _splat_chunk
+    alpha = alpha * opacity_p
+
+    # log1p(-alpha) is -inf at alpha == 1 (and its gradient diverges), so back
+    # off by one fp epsilon; forward error is ~1e-7, within the tiled-vs-dense
+    # tolerance.
+    eps = torch.finfo(alpha.dtype).eps
+    log_t = torch.log1p(-alpha.clamp(0.0, 1.0 - eps))  # (N, T^2), <= 0
+
+    row = pair_tile_y.unsqueeze(1) * tile_size + off_y_i
+    col = pair_tile_x.unsqueeze(1) * tile_size + off_x_i
+    flat = (pair_b.unsqueeze(1) * Hp + row) * Wp + col
+
+    buf = torch.zeros(
+        batch * Hp * Wp, device=log_t.device, dtype=log_t.dtype
+    )
+    return buf.scatter_add(0, flat.reshape(-1), log_t.reshape(-1))
+
+
+def _build_tile_pairs(means_bg, cos_bg, sin_bg, inv_sa2_bg, inv_sc2_bg,
+                      region, tile_size, n_tx, n_ty):
+    """Conservative (gaussian, tile) pairs for the tiled path.
+
+    Boxes each gaussian's cutoff support (|d_along| < sqrt(20/inv_sa2), same
+    for across, rotated to axis-aligned extents) and rasterizes the box to
+    tile ranges. Over-inclusion only costs speed; exactness comes from the
+    kernel's own cutoff. Index-building only — runs under no_grad.
+    """
+    y0, x0, h, w = region
+    with torch.no_grad():
+        half_a = (_MAHAL_SQ_CUTOFF / inv_sa2_bg).sqrt()
+        half_c = (_MAHAL_SQ_CUTOFF / inv_sc2_bg).sqrt()
+        hx = cos_bg.abs() * half_a + sin_bg.abs() * half_c
+        hy = sin_bg.abs() * half_a + cos_bg.abs() * half_c
+
+        # Bounds in region-local pixel-index space (pixel j has center j+0.5).
+        mx = means_bg[:, 0] - x0
+        my = means_bg[:, 1] - y0
+        x_lo, x_hi = mx - hx - 0.5, mx + hx - 0.5
+        y_lo, y_hi = my - hy - 0.5, my + hy - 0.5
+
+        keep = (x_hi >= 0) & (x_lo <= w - 1) & (y_hi >= 0) & (y_lo <= h - 1)
+        keep &= torch.isfinite(x_lo) & torch.isfinite(y_lo)
+        kept_idx = keep.nonzero(as_tuple=True)[0]
+        if kept_idx.numel() == 0:
+            empty = torch.empty(0, dtype=torch.long, device=means_bg.device)
+            return empty, empty, empty
+
+        ts = float(tile_size)
+        tx0 = torch.floor(x_lo[kept_idx] / ts).clamp(0, n_tx - 1).long()
+        tx1 = torch.floor(x_hi[kept_idx] / ts).clamp(0, n_tx - 1).long()
+        ty0 = torch.floor(y_lo[kept_idx] / ts).clamp(0, n_ty - 1).long()
+        ty1 = torch.floor(y_hi[kept_idx] / ts).clamp(0, n_ty - 1).long()
+
+        ntx = tx1 - tx0 + 1
+        nty = ty1 - ty0 + 1
+        nt = ntx * nty
+        total = int(nt.sum().item())
+
+        ptr = torch.repeat_interleave(
+            torch.arange(kept_idx.numel(), device=nt.device), nt
+        )
+        starts = torch.zeros_like(nt)
+        starts[1:] = nt.cumsum(0)[:-1]
+        rank = torch.arange(total, device=nt.device) - starts[ptr]
+        pair_tile_x = tx0[ptr] + rank % ntx[ptr]
+        pair_tile_y = ty0[ptr] + rank // ntx[ptr]
+        pair_gauss = kept_idx[ptr]
+        return pair_gauss, pair_tile_x, pair_tile_y
+
+
+def _splat_tiled(means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat,
+                 opacity_flat, region, tile_size, use_checkpoint):
+    """Tile-culled equivalent of the dense chunk loop.
+
+    Returns the combined alpha image (B, h, w) for the given region
+    (y0, x0, h, w) in canvas pixel coordinates.
+    """
+    B, G = opacity_flat.shape
+    device = means_flat.device
+    dtype = means_flat.dtype
+    y0, x0, h, w = region
+    T = tile_size
+    n_tx = (w + T - 1) // T
+    n_ty = (h + T - 1) // T
+    Hp, Wp = n_ty * T, n_tx * T  # padded to whole tiles; cropped at the end
+
+    means_bg = means_flat.reshape(B * G, 2)
+    cos_bg = cos_flat.reshape(B * G)
+    sin_bg = sin_flat.reshape(B * G)
+    inv_sa2_bg = inv_sa2_flat.reshape(B * G)
+    inv_sc2_bg = inv_sc2_flat.reshape(B * G)
+    opacity_bg = opacity_flat.reshape(B * G)
+
+    pair_gauss, pair_tile_x, pair_tile_y = _build_tile_pairs(
+        means_bg, cos_bg, sin_bg, inv_sa2_bg, inv_sc2_bg,
+        region, T, n_tx, n_ty,
+    )
+    pair_b = pair_gauss // G
+
+    # Within-tile pixel offsets, float for coordinates and long for indices.
+    off = torch.arange(T, device=device)
+    off_y_i, off_x_i = torch.meshgrid(off, off, indexing="ij")
+    off_x_i = off_x_i.reshape(-1)
+    off_y_i = off_y_i.reshape(-1)
+    off_x_f = off_x_i.to(dtype)
+    off_y_f = off_y_i.to(dtype)
+
+    # Chunk over pairs to bound peak memory (each pair holds T^2 elements
+    # across ~8 intermediates in fp32).
+    bytes_per_element = 4 if dtype == torch.float32 else 2
+    pair_chunk = max(256, (256 * 1024 * 1024) // (T * T * bytes_per_element * 8))
+
+    accum = torch.zeros(B * Hp * Wp, device=device, dtype=dtype)
+    n_pairs = pair_gauss.shape[0]
+    if n_pairs == 0 and torch.is_grad_enabled():
+        # Keep the output connected to the inputs so backward() yields zero
+        # gradients (like the dense path) instead of "unused parameter".
+        connect = (
+            means_bg.sum() + cos_bg.sum() + sin_bg.sum()
+            + inv_sa2_bg.sum() + inv_sc2_bg.sum() + opacity_bg.sum()
+        )
+        accum = accum + connect * 0.0
+    for start in range(0, n_pairs, pair_chunk):
+        end = min(start + pair_chunk, n_pairs)
+        args = (
+            pair_gauss[start:end], pair_tile_x[start:end],
+            pair_tile_y[start:end], pair_b[start:end],
+            means_bg, cos_bg, sin_bg, inv_sa2_bg, inv_sc2_bg, opacity_bg,
+            off_x_f, off_y_f, off_x_i, off_y_i,
+            float(x0), float(y0), T, Hp, Wp, B,
+        )
+        if use_checkpoint:
+            contrib = checkpoint(_splat_tile_chunk, *args, use_reentrant=False)
+        else:
+            contrib = _splat_tile_chunk(*args)
+        accum = accum + contrib
+
+    combined = 1.0 - torch.exp(accum)  # accum <= 0, so combined in [0, 1)
+    combined = combined.reshape(B, Hp, Wp)[:, :h, :w]
+    return combined
+
+
 def splat_render_cubics(
     cubics: torch.Tensor,
     stroke_widths: torch.Tensor,
@@ -221,6 +417,8 @@ def splat_render_cubics(
     pixel_box: tuple[int, int, int, int] | None = None,
     use_checkpoint: bool = True,
     use_compile: bool = False,
+    tiling: str = "none",
+    tile_size: int = 32,
 ) -> torch.Tensor:
     """Render cubic Bezier strokes via Gaussian splatting.
 
@@ -248,7 +446,21 @@ def splat_render_cubics(
             new shape pays compile latency (seconds). Availability is
             verified once per device type by compiling the kernel in a
             subprocess (seconds, one-time); if that preflight fails, warns
-            once and falls back to eager.
+            once and falls back to eager. Applies to the dense path only;
+            the tiled path ignores it.
+        tiling: "none" (default) is the dense all-pairs path, unchanged.
+            "tiles" culls gaussians to fixed-size tiles via conservative
+            bounding boxes before evaluation — same hard-cutoff semantics,
+            outputs match dense to fp32 noise (not bitwise). "auto" picks
+            "tiles" at or above _TILING_AUTO_THRESHOLD_G gaussians
+            (num_strokes * num_samples), else "none".
+        tile_size: Tile edge length in pixels for the tiled path.
+
+    Note on determinism: the tiled path accumulates with atomic scatter-adds
+    on CUDA (forward log-transmittance and backward parameter gradients), so
+    tiled outputs and gradients can vary at ~1-ulp scale between identical
+    runs on CUDA (measured max 1.2e-7 forward). On CPU the tiled path is
+    deterministic; the dense path is deterministic on both.
 
     Returns:
         (B, H, W) grayscale image ((B, h, w) when pixel_box is set).
@@ -259,6 +471,13 @@ def splat_render_cubics(
     dtype = cubics.dtype
     H = W = canvas_size
     K = num_samples
+
+    if tiling not in ("none", "tiles", "auto"):
+        raise ValueError(f'tiling must be "none", "tiles" or "auto", got {tiling!r}')
+    if tiling == "auto":
+        tiling = "tiles" if num_strokes * K >= _TILING_AUTO_THRESHOLD_G else "none"
+    if tiling == "tiles" and (not isinstance(tile_size, int) or tile_size < 1):
+        raise ValueError(f"tile_size must be a positive int, got {tile_size!r}")
 
     if pixel_box is not None:
         y0, x0, box_h, box_w = (int(v) for v in pixel_box)
@@ -316,6 +535,14 @@ def splat_render_cubics(
     inv_sa2_flat = inv_sa2.reshape(B, G)
     inv_sc2_flat = inv_sc2.reshape(B, G)
     opacity_flat = opacity_per_gauss.reshape(B, G)
+
+    if tiling == "tiles":
+        region = pixel_box if pixel_box is not None else (0, 0, H, W)
+        output = _splat_tiled(
+            means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat,
+            opacity_flat, region, tile_size, use_checkpoint,
+        )
+        return 1.0 - output.clamp(0.0, 1.0)
 
     # Create pixel grid (cached; restricted to pixel_box when set)
     pixels = _get_pixel_grid(canvas_size, pixel_box, device, dtype)
