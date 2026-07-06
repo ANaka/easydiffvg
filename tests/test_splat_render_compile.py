@@ -94,17 +94,23 @@ def test_use_compile_with_pixel_box(device):
 
 
 def test_fallback_warns_once_and_matches_eager(clean_compile_state, monkeypatch):
-    """When torch.compile is broken, use_compile=True warns once and produces
-    the eager result bitwise."""
+    """When the compile preflight fails, use_compile=True warns once and
+    produces the eager result bitwise (torch.compile is never attempted
+    in-process, since a failed in-process compile can poison dynamo state)."""
     from pydiffvg import splat_render
 
+    monkeypatch.setattr(
+        splat_render, "_run_compile_preflight",
+        lambda device_type: (False, "simulated inductor failure"),
+    )
+
     def broken_compile(*args, **kwargs):
-        raise RuntimeError("simulated inductor failure")
+        raise AssertionError("torch.compile must not run in-process after a failed preflight")
 
     monkeypatch.setattr(torch, "compile", broken_compile)
 
     out_eager, _ = _render_grads("cpu")
-    with pytest.warns(RuntimeWarning, match="torch.compile unavailable"):
+    with pytest.warns(RuntimeWarning, match="preflight"):
         out_fallback, _ = _render_grads("cpu", use_compile=True)
     assert torch.equal(out_eager, out_fallback)
 
@@ -118,12 +124,18 @@ def test_fallback_warns_once_and_matches_eager(clean_compile_state, monkeypatch)
 
 
 def test_default_path_never_touches_compile(clean_compile_state, monkeypatch):
-    """use_compile=False (the default) must not invoke torch.compile at all."""
+    """use_compile=False (the default) must invoke neither torch.compile nor
+    the preflight subprocess."""
+    from pydiffvg import splat_render
 
     def broken_compile(*args, **kwargs):
         raise AssertionError("torch.compile must not be called on the default path")
 
+    def broken_preflight(device_type):
+        raise AssertionError("the preflight must not run on the default path")
+
     monkeypatch.setattr(torch, "compile", broken_compile)
+    monkeypatch.setattr(splat_render, "_run_compile_preflight", broken_preflight)
 
     out, grads = _render_grads("cpu")  # would raise if compile were touched
     assert out.shape == (1, CANVAS, CANVAS)

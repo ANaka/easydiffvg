@@ -104,32 +104,73 @@ def _evaluate_bezier_tangent(control_points: torch.Tensor, t: torch.Tensor) -> t
     return 3.0 * (d0 * (p1 - p0) + d1 * (p2 - p1) + d2 * (p3 - p2))
 
 
-# torch.compile support for the splat kernel. Compilation is probed once per
-# device type with a trivial function: on machines where inductor cannot build
-# (missing compilers/headers, unsupported backend) use_compile degrades to
-# eager with a single warning instead of crashing mid-training-loop.
+# torch.compile support for the splat kernel. Whether compilation works is
+# established once per device type by compiling the REAL kernel
+# (forward + backward) in a subprocess. Two reasons it must be the real
+# kernel and must be out-of-process:
+# - a trivial probe can pass off inductor's on-disk cache while the actual
+#   kernel build still fails (observed with missing Python.h);
+# - a failed in-process compile can leave dynamo/inductor state broken so
+#   that subsequent grad-mode EAGER calls raise InductorError, and
+#   torch._dynamo.reset() does not recover (observed empirically). A broken
+#   probe subprocess costs seconds; a poisoned training process costs the run.
 _COMPILE_OK: dict = {}  # device type -> bool
 _COMPILED_SPLAT_CHUNK = None
 
+_COMPILE_PREFLIGHT_CODE = """
+import torch
+from pydiffvg.splat_render import _splat_chunk
 
-def _compile_probe(x: torch.Tensor) -> torch.Tensor:
-    return x * 2.0 + 1.0
+device = "{device_type}"
+g, p = 3, 5
+means = torch.rand(1, g, 2, device=device, requires_grad=True)
+angles = torch.rand(1, g, device=device)
+out = torch.compile(_splat_chunk)(
+    torch.rand(p, 2, device=device),
+    means,
+    torch.cos(angles),
+    torch.sin(angles),
+    torch.rand(1, g, device=device) + 0.5,
+    torch.rand(1, g, device=device) + 0.5,
+    torch.rand(1, g, device=device),
+)
+out.sum().backward()
+assert means.grad is not None
+"""
+
+
+def _run_compile_preflight(device_type: str) -> tuple[bool, str]:
+    """Compile the splat kernel in a subprocess; return (ok, failure detail)."""
+    import subprocess
+    import sys
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _COMPILE_PREFLIGHT_CODE.format(device_type=device_type)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception as exc:  # noqa: BLE001 - any launch failure means "unavailable"
+        return False, f"{type(exc).__name__}: {exc}"
+    if proc.returncode == 0:
+        return True, ""
+    tail = proc.stderr.strip().splitlines()
+    return False, tail[-1] if tail else f"exit code {proc.returncode}"
 
 
 def _compile_available(device: torch.device) -> bool:
     ok = _COMPILE_OK.get(device.type)
     if ok is None:
-        try:
-            torch.compile(_compile_probe)(torch.zeros(8, device=device))
-            ok = True
-        except Exception as exc:  # noqa: BLE001 - any backend failure means "unavailable"
+        ok, detail = _run_compile_preflight(device.type)
+        if not ok:
             warnings.warn(
-                f"torch.compile unavailable on {device.type} "
-                f"({type(exc).__name__}: {exc}); use_compile=True falls back to eager.",
+                f"torch.compile of the splat kernel failed in a preflight "
+                f"subprocess on {device.type} ({detail}); use_compile=True "
+                "falls back to eager.",
                 RuntimeWarning,
                 stacklevel=3,
             )
-            ok = False
         _COMPILE_OK[device.type] = ok
     return ok
 
@@ -139,6 +180,13 @@ def _get_splat_chunk_fn(use_compile: bool, device: torch.device):
     if not (use_compile and _compile_available(device)):
         return _splat_chunk
     if _COMPILED_SPLAT_CHUNK is None:
+        if torch.cuda.is_available():
+            # Inductor may lazily initialize CUDA during the first compiled
+            # call (even when targeting CPU); if that first call happens
+            # inside torch.utils.checkpoint's forward, checkpoint raises
+            # "device state was initialized in the forward pass". Initialize
+            # device state up front instead.
+            torch.cuda.init()
         _COMPILED_SPLAT_CHUNK = torch.compile(_splat_chunk)
     return _COMPILED_SPLAT_CHUNK
 
@@ -197,8 +245,10 @@ def splat_render_cubics(
             False, the original eager behavior). Measured ~1.7x at ~100
             gaussians and ~8.6x at ~10k gaussians on an RTX 5090; outputs
             match eager to fp32 noise (~1e-7), not bitwise. First call per
-            new shape pays compile latency (seconds). If compilation is
-            unavailable on the device, warns once and falls back to eager.
+            new shape pays compile latency (seconds). Availability is
+            verified once per device type by compiling the kernel in a
+            subprocess (seconds, one-time); if that preflight fails, warns
+            once and falls back to eager.
 
     Returns:
         (B, H, W) grayscale image ((B, h, w) when pixel_box is set).
