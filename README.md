@@ -60,7 +60,7 @@ multiplication.
 | `pixel_box=(y0, x0, h, w)` | Rasterize only that window, returning `(B, h, w)` — exactly the full render's slice | Local-window fitting; 63 → 2.9 ms/iter on a 6-stroke 96×96-window fit (21.9×) |
 | `use_checkpoint=False` | Skip gradient checkpointing (recompute overhead) | Small gaussian counts; keep `True` at large counts to bound memory |
 | `use_compile=True` | Run the splat kernel through `torch.compile` (falls back to eager with a warning if inductor is unavailable) | ~1.7× at 100 gaussians, ~8.6× at 10k; costs seconds of compile time on first call per shape |
-| `tiling="tiles"` (or `"auto"`), `tile_size` | Tile-culled evaluation: each gaussian only touches the tiles its ~4.5σ support overlaps | Large scenes: 11–16× at 10k–40k gaussians with *lower* peak memory; `"auto"` switches by gaussian count |
+| `tiling="tiles"` (or `"auto"`), `tile_size` | Tile-culled evaluation: each gaussian only touches the tiles its ~4.5σ support overlaps | Won every measured config: 8–22× on full frames (G = 96…40,960), 1.4× even on a 96×96 window, lower peak memory at scale; `"auto"` currently always tiles |
 
 Numbers above: RTX 5090, fp32, forward+backward, canvas 384. Reproduce with
 the scripts in `benchmarks/`. Exactness: `pixel_box` and `use_checkpoint` are

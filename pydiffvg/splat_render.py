@@ -229,9 +229,12 @@ def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opac
 _MAHAL_SQ_CUTOFF = 20.0
 
 # tiling="auto" uses tiles at or above this per-image gaussian count
-# (num_strokes * num_samples). Set from the measured dense/tiled crossover in
-# benchmarks/bench_splat_tiling.py on an RTX 5090 at canvas 384.
-_TILING_AUTO_THRESHOLD_G = 1024  # provisional; finalized by benchmark
+# (num_strokes * num_samples). benchmarks/bench_splat_tiling.py on an RTX 5090
+# found NO crossover: tiled won every measured config (G=16..40960, full-frame
+# canvas 384/768 at 8.1-21.9x, and a 96x96 pixel_box window at 1.4x), so auto
+# always tiles. Kept as a constant so deployments can re-tune if a slower
+# device shows a real crossover.
+_TILING_AUTO_THRESHOLD_G = 0
 
 
 def _splat_tile_chunk(
@@ -418,7 +421,7 @@ def splat_render_cubics(
     use_checkpoint: bool = True,
     use_compile: bool = False,
     tiling: str = "none",
-    tile_size: int = 32,
+    tile_size: int = 16,
 ) -> torch.Tensor:
     """Render cubic Bezier strokes via Gaussian splatting.
 
@@ -454,7 +457,9 @@ def splat_render_cubics(
             outputs match dense to fp32 noise (not bitwise). "auto" picks
             "tiles" at or above _TILING_AUTO_THRESHOLD_G gaussians
             (num_strokes * num_samples), else "none".
-        tile_size: Tile edge length in pixels for the tiled path.
+        tile_size: Tile edge length in pixels for the tiled path. Default 16
+            measured fastest at gaussian counts >= 512 on an RTX 5090 (32 was
+            marginally better below that, within ~5%).
 
     Note on determinism: the tiled path accumulates with atomic scatter-adds
     on CUDA (forward log-transmittance and backward parameter gradients), so
