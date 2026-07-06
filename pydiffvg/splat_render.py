@@ -7,8 +7,44 @@ Based on "Bezier Splatting for Fast and Differentiable Vector Graphics Rendering
 (arXiv:2503.16424).
 """
 
+import collections
+
 import torch
 from torch.utils.checkpoint import checkpoint
+
+# LRU cache of flattened pixel grids keyed by (canvas_size, pixel_box, device,
+# dtype). Capped because callers that slide a pixel_box window across the
+# canvas would otherwise accumulate one grid per window position.
+_PIXEL_GRID_CACHE: collections.OrderedDict = collections.OrderedDict()
+_PIXEL_GRID_CACHE_MAX_ENTRIES = 64
+
+
+def _get_pixel_grid(
+    canvas_size: int,
+    pixel_box: tuple[int, int, int, int] | None,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Return flattened pixel-center coordinates, (num_pixels, 2) as (x, y).
+
+    pixel_box=(y0, x0, h, w) restricts the grid to that window; None covers
+    the full canvas. Grids are cached per (canvas_size, pixel_box, device,
+    dtype) with LRU eviction.
+    """
+    key = (canvas_size, pixel_box, device, dtype)
+    pixels = _PIXEL_GRID_CACHE.get(key)
+    if pixels is None:
+        y0, x0, h, w = pixel_box if pixel_box is not None else (0, 0, canvas_size, canvas_size)
+        py = torch.arange(y0, y0 + h, device=device, dtype=dtype) + 0.5
+        px = torch.arange(x0, x0 + w, device=device, dtype=dtype) + 0.5
+        grid_y, grid_x = torch.meshgrid(py, px, indexing="ij")
+        pixels = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+        _PIXEL_GRID_CACHE[key] = pixels
+        if len(_PIXEL_GRID_CACHE) > _PIXEL_GRID_CACHE_MAX_ENTRIES:
+            _PIXEL_GRID_CACHE.popitem(last=False)
+    else:
+        _PIXEL_GRID_CACHE.move_to_end(key)
+    return pixels
 
 
 def _evaluate_bezier(control_points: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
@@ -67,6 +103,26 @@ def _evaluate_bezier_tangent(control_points: torch.Tensor, t: torch.Tensor) -> t
     return 3.0 * (d0 * (p1 - p0) + d1 * (p2 - p1) + d2 * (p3 - p2))
 
 
+def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opacity_f):
+    """Compute combined alpha for a chunk of pixels using over compositing."""
+    dx = chunk_pixels[None, None, :, 0] - means_f[:, :, None, 0]
+    dy = chunk_pixels[None, None, :, 1] - means_f[:, :, None, 1]
+    d_along = cos_f[:, :, None] * dx + sin_f[:, :, None] * dy
+    d_across = -sin_f[:, :, None] * dx + cos_f[:, :, None] * dy
+    mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
+    alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
+    # Hard cutoff beyond the clamp radius (~4.5 sigma): clamping alone
+    # leaves an exp(-10) alpha floor on EVERY pixel for EVERY gaussian,
+    # which composites into a visible gray background wash at scale
+    # (e.g. 40k gaussians -> (1 - exp(-10))^40k ~ 0.2 background).
+    alpha = alpha * (mahal_sq < 20.0)
+    alpha = alpha * opacity_f[:, :, None]  # Apply per-stroke opacity
+    # Alpha compositing: combined = 1 - prod(1 - alpha_i)
+    # This gives natural overlap behavior instead of saturation
+    transmittance = (1.0 - alpha.clamp(0.0, 1.0)).prod(dim=1)
+    return 1.0 - transmittance  # (B, num_pixels)
+
+
 def splat_render_cubics(
     cubics: torch.Tensor,
     stroke_widths: torch.Tensor,
@@ -74,6 +130,8 @@ def splat_render_cubics(
     num_samples: int = 20,
     pixel_chunk_size: int = 2048,
     opacities: torch.Tensor | None = None,
+    pixel_box: tuple[int, int, int, int] | None = None,
+    use_checkpoint: bool = True,
 ) -> torch.Tensor:
     """Render cubic Bezier strokes via Gaussian splatting.
 
@@ -86,15 +144,35 @@ def splat_render_cubics(
         num_samples: Number of sample points per Bezier curve.
         pixel_chunk_size: Pixels to process at once (memory control).
         opacities: (B, num_strokes) per-stroke opacity in [0, 1]. Defaults to 1.
+        pixel_box: (y0, x0, h, w) in pixel coordinates. When set, only that
+            window is rasterized and the output is (B, h, w), matching the
+            [y0:y0+h, x0:x0+w] slice of the full render. None (default)
+            renders the full canvas.
+        use_checkpoint: Wrap per-chunk splatting in gradient checkpointing
+            (default True, the original behavior). Checkpointing recomputes
+            the forward during backward to save memory; set False to trade
+            memory for speed at small gaussian counts.
 
     Returns:
-        (B, H, W) grayscale image. White background (1.0), black strokes (0.0).
+        (B, H, W) grayscale image ((B, h, w) when pixel_box is set).
+        White background (1.0), black strokes (0.0).
     """
     B, num_strokes, _, _ = cubics.shape
     device = cubics.device
     dtype = cubics.dtype
     H = W = canvas_size
     K = num_samples
+
+    if pixel_box is not None:
+        y0, x0, box_h, box_w = (int(v) for v in pixel_box)
+        if box_h <= 0 or box_w <= 0:
+            raise ValueError(f"pixel_box height/width must be positive, got {pixel_box}")
+        if y0 < 0 or x0 < 0 or y0 + box_h > H or x0 + box_w > W:
+            raise ValueError(f"pixel_box {pixel_box} exceeds canvas of size {canvas_size}")
+        pixel_box = (y0, x0, box_h, box_w)
+        out_h, out_w = box_h, box_w
+    else:
+        out_h, out_w = H, W
 
     # Sample points and tangents along curves
     t_vals = torch.linspace(0, 1, K, device=device, dtype=dtype)
@@ -142,11 +220,8 @@ def splat_render_cubics(
     inv_sc2_flat = inv_sc2.reshape(B, G)
     opacity_flat = opacity_per_gauss.reshape(B, G)
 
-    # Create pixel grid
-    py = torch.arange(H, device=device, dtype=dtype) + 0.5
-    px = torch.arange(W, device=device, dtype=dtype) + 0.5
-    grid_y, grid_x = torch.meshgrid(py, px, indexing="ij")
-    pixels = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
+    # Create pixel grid (cached; restricted to pixel_box when set)
+    pixels = _get_pixel_grid(canvas_size, pixel_box, device, dtype)
     total_pixels = pixels.shape[0]
 
     # Adaptive chunk size for memory efficiency
@@ -155,39 +230,26 @@ def splat_render_cubics(
     adaptive_chunk = max(64, max_chunk_memory // (B * G * bytes_per_element * 6))
     chunk_size = min(pixel_chunk_size, adaptive_chunk, total_pixels)
 
-    def _splat_chunk(chunk_pixels, means_f, cos_f, sin_f, inv_sa2_f, inv_sc2_f, opacity_f):
-        """Compute combined alpha for a chunk of pixels using over compositing."""
-        dx = chunk_pixels[None, None, :, 0] - means_f[:, :, None, 0]
-        dy = chunk_pixels[None, None, :, 1] - means_f[:, :, None, 1]
-        d_along = cos_f[:, :, None] * dx + sin_f[:, :, None] * dy
-        d_across = -sin_f[:, :, None] * dx + cos_f[:, :, None] * dy
-        mahal_sq = d_along.square() * inv_sa2_f[:, :, None] + d_across.square() * inv_sc2_f[:, :, None]
-        alpha = torch.exp(-0.5 * mahal_sq.clamp(max=20.0))
-        # Hard cutoff beyond the clamp radius (~4.5 sigma): clamping alone
-        # leaves an exp(-10) alpha floor on EVERY pixel for EVERY gaussian,
-        # which composites into a visible gray background wash at scale
-        # (e.g. 40k gaussians -> (1 - exp(-10))^40k ~ 0.2 background).
-        alpha = alpha * (mahal_sq < 20.0)
-        alpha = alpha * opacity_f[:, :, None]  # Apply per-stroke opacity
-        # Alpha compositing: combined = 1 - prod(1 - alpha_i)
-        # This gives natural overlap behavior instead of saturation
-        transmittance = (1.0 - alpha.clamp(0.0, 1.0)).prod(dim=1)
-        return 1.0 - transmittance  # (B, num_pixels)
-
-    # Process in chunks with gradient checkpointing
+    # Process in chunks, with gradient checkpointing unless disabled
     chunks = []
     for start in range(0, total_pixels, chunk_size):
         end = min(start + chunk_size, total_pixels)
         chunk_pixels = pixels[start:end]
-        chunk_out = checkpoint(
-            _splat_chunk, chunk_pixels,
-            means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat, opacity_flat,
-            use_reentrant=False,
-        )
+        if use_checkpoint:
+            chunk_out = checkpoint(
+                _splat_chunk, chunk_pixels,
+                means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat, opacity_flat,
+                use_reentrant=False,
+            )
+        else:
+            chunk_out = _splat_chunk(
+                chunk_pixels,
+                means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat, opacity_flat,
+            )
         chunks.append(chunk_out)
 
     output = torch.cat(chunks, dim=1)
-    output = output.reshape(B, H, W)
+    output = output.reshape(B, out_h, out_w)
     result = 1.0 - output.clamp(0.0, 1.0)
 
     return result
