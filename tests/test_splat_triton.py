@@ -206,6 +206,16 @@ def test_triton_path_rejects_cpu_and_bad_dtype():
                                 canvas_size=32, tiling="triton")
 
 
+def test_triton_tile_size_validation():
+    from pydiffvg.splat_render import splat_render_cubics
+
+    torch.manual_seed(0)
+    c = torch.rand(1, 2, 4, 2) * 2 - 1
+    w = torch.rand(1, 2) + 0.5
+    with pytest.raises(ValueError, match="tile_size"):
+        splat_render_cubics(c, w, canvas_size=32, tiling="triton", tile_size=0)
+
+
 @cuda_only
 def test_triton_hairline_and_degenerate_sigma():
     """Near-zero stroke widths: amended gates (plan 2026-07-06, human-approved).

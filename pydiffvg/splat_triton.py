@@ -62,7 +62,7 @@ def triton_available() -> bool:
 
 
 if _TRITON_IMPORTED:
-    # Must match the literals in splat_render._splat_chunk / _MAHAL_SQ_CUTOFF.
+    # Must match splat_render._MAHAL_SQ_CUTOFF (and the literal 20.0 in _splat_chunk).
     _MAHAL = tl.constexpr(20.0)
 
     @triton.jit

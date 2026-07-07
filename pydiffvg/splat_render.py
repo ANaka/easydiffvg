@@ -486,7 +486,7 @@ def splat_render_cubics(
         )
     if tiling == "auto":
         tiling = "tiles" if num_strokes * K >= _TILING_AUTO_THRESHOLD_G else "none"
-    if tiling == "tiles" and (not isinstance(tile_size, int) or tile_size < 1):
+    if tiling in ("tiles", "triton") and (not isinstance(tile_size, int) or tile_size < 1):
         raise ValueError(f"tile_size must be a positive int, got {tile_size!r}")
 
     if pixel_box is not None:

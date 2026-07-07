@@ -61,7 +61,7 @@ multiplication.
 | `use_checkpoint=False` | Skip gradient checkpointing (recompute overhead) | Small gaussian counts; keep `True` at large counts to bound memory |
 | `use_compile=True` | Run the splat kernel through `torch.compile` (falls back to eager with a warning if inductor is unavailable) | ~1.7× at 100 gaussians, ~8.6× at 10k; costs seconds of compile time on first call per shape |
 | `tiling="tiles"` (or `"auto"`), `tile_size` | Tile-culled evaluation: each gaussian only touches the tiles its ~4.5σ support overlaps | Won every measured config: 8–22× on full frames (G = 96…40,960), 1.4× even on a 96×96 window, lower peak memory at scale; `"auto"` currently always tiles |
-| `tiling="triton"`, `tile_size` | Same tile culling as `"tiles"`, but the per-tile evaluation runs as Triton kernels (CUDA + fp32 only; `tile_size=16` measured fastest) | ~16× over `tiling="tiles"` at 10k gaussians (47.0 → 3.0 ms/iter, canvas 384), up to ~34× at 768² (136.5 → 4.0 ms/iter); peak memory 33 MB vs 728 MB at G=10,240. First call per shape pays Triton JIT compile latency (seconds) |
+| `tiling="triton"`, `tile_size` | Same tile culling as `"tiles"`, but the per-tile evaluation runs as Triton kernels (CUDA + fp32 only; `tile_size=16` measured fastest) | ~16× over `tiling="tiles"` at 10k gaussians (47.0 → 3.0 ms/iter, canvas 384), up to ~34× at 768² (136.5 → 4.0 ms/iter; gains shrink toward ~1.7× at ~100 gaussians); peak memory 33 MB vs 728 MB at G=10,240. First call per shape pays Triton JIT compile latency (seconds) |
 
 Numbers above: RTX 5090, fp32, forward+backward, canvas 384. Reproduce with
 the scripts in `benchmarks/`. Exactness: `pixel_box` and `use_checkpoint` are
