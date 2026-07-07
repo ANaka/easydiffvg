@@ -101,3 +101,50 @@ def test_fwd_kernel_accum_matches_tiles_path():
                           op.reshape(B, G), (0, 0, canvas, canvas), T, True)
     ref = 1.0 - ref.clamp(0.0, 1.0)
     assert (tri - ref).abs().max().item() <= 1e-5
+
+
+@cuda_only
+def test_triton_accum_gradients_match_pytorch_tiled():
+    from pydiffvg import splat_render as sr
+    from pydiffvg import splat_triton as st
+
+    if not st.triton_available():
+        pytest.skip("triton unavailable")
+
+    torch.manual_seed(4)
+    B, G, T, canvas = 1, 128, 16, 128
+    n_t = canvas // T
+
+    def make_params():
+        means = (torch.rand(B * G, 2, device="cuda") * canvas).requires_grad_(True)
+        ang = torch.rand(B * G, device="cuda") * 6.28
+        cos_ = torch.cos(ang).detach().requires_grad_(True)
+        sin_ = torch.sin(ang).detach().requires_grad_(True)
+        isa = (1.0 / (torch.rand(B * G, device="cuda") * 9 + 0.01)).requires_grad_(True)
+        isc = (1.0 / (torch.rand(B * G, device="cuda") * 4 + 0.01)).requires_grad_(True)
+        op = torch.rand(B * G, device="cuda").requires_grad_(True)
+        return means, cos_, sin_, isa, isc, op
+
+    means, cos_, sin_, isa, isc, op = make_params()
+    with torch.no_grad():
+        pg, ptx, pty = sr._build_tile_pairs(means, cos_, sin_, isa, isc,
+                                            (0, 0, canvas, canvas), T, n_t, n_t)
+    segs = st.build_tile_segments(pg, ptx, pty, G, n_t, n_t)
+
+    accum = st.triton_splat_accum(
+        means[:, 0].contiguous(), means[:, 1].contiguous(), cos_, sin_, isa, isc, op,
+        segs, 0.0, 0.0, canvas, canvas, B, T,
+    )
+    out_tri = (1.0 - torch.exp(accum)).reshape(B, canvas, canvas)
+
+    out_ref = sr._splat_tiled(means.reshape(B, G, 2), cos_.reshape(B, G),
+                              sin_.reshape(B, G), isa.reshape(B, G), isc.reshape(B, G),
+                              op.reshape(B, G), (0, 0, canvas, canvas), T, True)
+
+    torch.manual_seed(5)
+    tgt = torch.rand_like(out_ref)
+    inputs = [means, cos_, sin_, isa, isc, op]
+    g_ref = torch.autograd.grad(((out_ref - tgt) ** 2).mean(), inputs, retain_graph=True)
+    g_tri = torch.autograd.grad(((out_tri - tgt) ** 2).mean(), inputs)
+    for a, b in zip(g_ref, g_tri):
+        assert (a - b).abs().max().item() <= 1e-5
