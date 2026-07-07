@@ -457,6 +457,9 @@ def splat_render_cubics(
             outputs match dense to fp32 noise (not bitwise). "auto" picks
             "tiles" at or above _TILING_AUTO_THRESHOLD_G gaussians
             (num_strokes * num_samples), else "none".
+            "triton" runs the tile-culled evaluation as Triton kernels (CUDA +
+            float32 only; ~17x over "tiles" at 10k gaussians). use_checkpoint
+            and use_compile are ignored on this path.
         tile_size: Tile edge length in pixels for the tiled path. Default 16
             measured fastest at gaussian counts >= 512 on an RTX 5090 (32 was
             marginally better below that, within ~5%).
@@ -477,8 +480,10 @@ def splat_render_cubics(
     H = W = canvas_size
     K = num_samples
 
-    if tiling not in ("none", "tiles", "auto"):
-        raise ValueError(f'tiling must be "none", "tiles" or "auto", got {tiling!r}')
+    if tiling not in ("none", "tiles", "auto", "triton"):
+        raise ValueError(
+            f'tiling must be "none", "tiles", "auto" or "triton", got {tiling!r}'
+        )
     if tiling == "auto":
         tiling = "tiles" if num_strokes * K >= _TILING_AUTO_THRESHOLD_G else "none"
     if tiling == "tiles" and (not isinstance(tile_size, int) or tile_size < 1):
@@ -547,6 +552,49 @@ def splat_render_cubics(
             means_flat, cos_flat, sin_flat, inv_sa2_flat, inv_sc2_flat,
             opacity_flat, region, tile_size, use_checkpoint,
         )
+        return 1.0 - output.clamp(0.0, 1.0)
+
+    if tiling == "triton":
+        from pydiffvg import splat_triton
+
+        if cubics.device.type != "cuda" or not splat_triton.triton_available():
+            raise RuntimeError(
+                'tiling="triton" requires CUDA with triton importable; '
+                'use tiling="tiles" elsewhere'
+            )
+        if dtype != torch.float32:
+            raise RuntimeError(f'tiling="triton" supports float32 only, got {dtype}')
+        region = pixel_box if pixel_box is not None else (0, 0, H, W)
+        ry0, rx0, rh, rw = region
+        T = tile_size
+        n_tx, n_ty = (rw + T - 1) // T, (rh + T - 1) // T
+        Hp, Wp = n_ty * T, n_tx * T
+        means_bg = means_flat.reshape(B * num_strokes * K, 2)
+        cos_bg = cos_flat.reshape(-1)
+        sin_bg = sin_flat.reshape(-1)
+        inv_sa2_bg = inv_sa2_flat.reshape(-1)
+        inv_sc2_bg = inv_sc2_flat.reshape(-1)
+        opacity_bg = opacity_flat.reshape(-1)
+        pair_gauss, ptx, pty = _build_tile_pairs(
+            means_bg, cos_bg, sin_bg, inv_sa2_bg, inv_sc2_bg, region, T, n_tx, n_ty
+        )
+        segs = splat_triton.build_tile_segments(
+            pair_gauss, ptx, pty, num_strokes * K, n_tx, n_ty
+        )
+        accum = splat_triton.triton_splat_accum(
+            means_bg[:, 0].contiguous(), means_bg[:, 1].contiguous(),
+            cos_bg.contiguous(), sin_bg.contiguous(),
+            inv_sa2_bg.contiguous(), inv_sc2_bg.contiguous(),
+            opacity_bg.contiguous(),
+            segs, rx0, ry0, Hp, Wp, B, T,
+        )
+        if pair_gauss.numel() == 0 and torch.is_grad_enabled():
+            connect = (
+                means_bg.sum() + cos_bg.sum() + sin_bg.sum()
+                + inv_sa2_bg.sum() + inv_sc2_bg.sum() + opacity_bg.sum()
+            )
+            accum = accum + connect * 0.0
+        output = (1.0 - torch.exp(accum)).reshape(B, Hp, Wp)[:, :rh, :rw]
         return 1.0 - output.clamp(0.0, 1.0)
 
     # Create pixel grid (cached; restricted to pixel_box when set)

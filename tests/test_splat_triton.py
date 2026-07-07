@@ -53,7 +53,6 @@ def _scene(strokes, seed=0, device="cuda"):
 
 
 @cuda_only
-@pytest.mark.skip(reason="tiling='triton' wired in Task 4")
 @pytest.mark.parametrize("tile", [16, 32])
 def test_triton_forward_matches_dense(tile):
     from pydiffvg.splat_render import splat_render_cubics
@@ -148,3 +147,101 @@ def test_triton_accum_gradients_match_pytorch_tiled():
     g_tri = torch.autograd.grad(((out_tri - tgt) ** 2).mean(), inputs)
     for a, b in zip(g_ref, g_tri):
         assert (a - b).abs().max().item() <= 1e-5
+
+
+@cuda_only
+@pytest.mark.parametrize("tile", [16, 32])
+def test_triton_path_end_to_end(tile):
+    from pydiffvg.splat_render import splat_render_cubics
+
+    c, w, o = _scene(20, seed=7)
+    kw = dict(canvas_size=384, num_samples=16, opacities=o)
+    dense = splat_render_cubics(c, w, **kw)
+    tri = splat_render_cubics(c, w, **kw, tiling="triton", tile_size=tile)
+    assert (dense - tri).abs().max().item() <= 1e-5
+
+    torch.manual_seed(8)
+    tgt = torch.rand_like(dense)
+    gd = torch.autograd.grad(((dense - tgt) ** 2).mean(), [c, w, o], retain_graph=True)
+    gt = torch.autograd.grad(((tri - tgt) ** 2).mean(), [c, w, o])
+    for a, b in zip(gd, gt):
+        assert (a - b).abs().max().item() <= 1e-5
+
+
+@cuda_only
+def test_triton_path_pixel_box_and_zero_pairs():
+    from pydiffvg.splat_render import splat_render_cubics
+
+    c, w, o = _scene(6, seed=9)
+    box = (17, 9, 24, 20)
+    dense = splat_render_cubics(c, w, canvas_size=64, num_samples=16, opacities=o,
+                                pixel_box=box)
+    tri = splat_render_cubics(c, w, canvas_size=64, num_samples=16, opacities=o,
+                              pixel_box=box, tiling="triton", tile_size=16)
+    assert tri.shape == (1, 24, 20)
+    assert (dense - tri).abs().max().item() <= 1e-5
+
+    # Fully off-canvas: white output, exact-zero grads (graph stub).
+    torch.manual_seed(10)
+    c_off = (torch.rand(1, 4, 4, 2, device="cuda") + 5.0).requires_grad_(True)
+    w_off = (torch.rand(1, 4, device="cuda") + 0.5).requires_grad_(True)
+    out = splat_render_cubics(c_off, w_off, canvas_size=64, num_samples=16,
+                              tiling="triton")
+    assert (out == 1.0).all()
+    g = torch.autograd.grad(out.sum(), [c_off, w_off])
+    assert all((x == 0).all() for x in g)
+
+
+def test_triton_path_rejects_cpu_and_bad_dtype():
+    from pydiffvg.splat_render import splat_render_cubics
+
+    torch.manual_seed(0)
+    c = torch.rand(1, 2, 4, 2) * 2 - 1
+    w = torch.rand(1, 2) + 0.5
+    with pytest.raises(RuntimeError, match="triton"):
+        splat_render_cubics(c, w, canvas_size=32, tiling="triton")
+    if torch.cuda.is_available():
+        with pytest.raises(RuntimeError, match="float32"):
+            splat_render_cubics(c.cuda().double(), w.cuda().double(),
+                                canvas_size=32, tiling="triton")
+
+
+@cuda_only
+def test_triton_hairline_and_degenerate_sigma():
+    """Near-zero stroke widths: amended gates (plan 2026-07-06, human-approved).
+
+    Sub-pixel hairlines are ill-conditioned beyond fp32 op-order equivalence:
+    at sigma=1e-6 the inverse variance is ~1e8 and FMA-contraction differences
+    flip pixels across the mahal<20 cutoff, so no independently-compiled
+    kernel can match eager gradients to an absolute tolerance. Real strokes
+    are sigma in [1, 5] px; the decision is recorded in the plan. Gates:
+    sigma=1e-2 holds the full <=1e-5 forward+grad gates vs dense; sigma=1e-6
+    holds forward <=1e-5 vs dense plus finite (no NaN/inf) grads only. Each
+    boundary-pixel flip perturbs the forward by exp(-10)*opacity (~4.5e-5*op),
+    so the sigma=1e-6 case uses opacities < 0.2 to keep any single flip
+    within the forward gate regardless of which pixels flip.
+    """
+    from pydiffvg.splat_render import splat_render_cubics
+
+    torch.manual_seed(11)
+    c0 = torch.rand(1, 8, 4, 2, device="cuda") * 2 - 1
+    o0 = torch.rand(1, 8, device="cuda") * 0.5 + 0.5
+
+    for width, grad_gate, op_scale in ((1e-2, True, 1.0), (1e-6, False, 0.2)):
+        c = c0.clone().requires_grad_(True)
+        w = torch.full((1, 8), width, device="cuda", requires_grad=True)
+        o = (o0 * op_scale).detach().requires_grad_(True)
+        kw = dict(canvas_size=64, num_samples=16, opacities=o)
+        dense = splat_render_cubics(c, w, **kw)
+        tri = splat_render_cubics(c, w, **kw, tiling="triton", tile_size=16)
+        assert (dense - tri).abs().max().item() <= 1e-5
+
+        torch.manual_seed(12)
+        tgt = torch.rand_like(dense)
+        gd = torch.autograd.grad(((dense - tgt) ** 2).mean(), [c, w, o],
+                                 retain_graph=True)
+        gt = torch.autograd.grad(((tri - tgt) ** 2).mean(), [c, w, o])
+        assert all(torch.isfinite(x).all() for x in gt)
+        if grad_gate:
+            for a, b in zip(gd, gt):
+                assert (a - b).abs().max().item() <= 1e-5
