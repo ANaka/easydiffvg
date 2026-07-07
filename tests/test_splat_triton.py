@@ -39,3 +39,65 @@ def test_build_tile_segments_empty():
     empty = torch.empty(0, dtype=torch.long)
     segs = build_tile_segments(empty, empty, empty, G=4, n_tx=3, n_ty=3)
     assert segs.seg_start.shape[0] == 0
+
+
+cuda_only = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+
+
+def _scene(strokes, seed=0, device="cuda"):
+    torch.manual_seed(seed)
+    c = (torch.rand(1, strokes, 4, 2, device=device) * 2 - 1).requires_grad_(True)
+    w = (torch.rand(1, strokes, device=device) * 3 + 0.5).requires_grad_(True)
+    o = (torch.rand(1, strokes, device=device) * 0.5 + 0.5).requires_grad_(True)
+    return c, w, o
+
+
+@cuda_only
+@pytest.mark.skip(reason="tiling='triton' wired in Task 4")
+@pytest.mark.parametrize("tile", [16, 32])
+def test_triton_forward_matches_dense(tile):
+    from pydiffvg.splat_render import splat_render_cubics
+
+    c, w, o = _scene(6)
+    dense = splat_render_cubics(c, w, canvas_size=384, num_samples=16, opacities=o)
+    tri = splat_render_cubics(c, w, canvas_size=384, num_samples=16, opacities=o,
+                              tiling="triton", tile_size=tile)
+    assert (dense - tri).abs().max().item() <= 1e-5
+
+
+@cuda_only
+def test_fwd_kernel_accum_matches_tiles_path():
+    from pydiffvg import splat_render as sr
+    from pydiffvg import splat_triton as st
+
+    if not st.triton_available():
+        pytest.skip("triton unavailable")
+
+    torch.manual_seed(3)
+    B, G = 2, 64
+    means = torch.rand(B * G, 2, device="cuda") * 384
+    ang = torch.rand(B * G, device="cuda") * 6.28
+    cos_, sin_ = torch.cos(ang), torch.sin(ang)
+    isa = 1.0 / (torch.rand(B * G, device="cuda") * 9 + 0.01)
+    isc = 1.0 / (torch.rand(B * G, device="cuda") * 4 + 0.01)
+    op = torch.rand(B * G, device="cuda")
+
+    T, canvas = 16, 384
+    n_t = canvas // T
+    pg, ptx, pty = sr._build_tile_pairs(means, cos_, sin_, isa, isc,
+                                        (0, 0, canvas, canvas), T, n_t, n_t)
+    segs = st.build_tile_segments(pg, ptx, pty, G, n_t, n_t)
+    accum = torch.zeros(B * canvas * canvas, device="cuda")
+    st._fwd_kernel[(segs.seg_start.shape[0],)](
+        segs.pg, segs.seg_start, segs.seg_count, segs.seg_b, segs.seg_ty, segs.seg_tx,
+        means[:, 0].contiguous(), means[:, 1].contiguous(), cos_, sin_, isa, isc, op,
+        accum, 0.0, 0.0, canvas, canvas,
+        TILE=T, BLOCK_G=16, EPS_C=torch.finfo(torch.float32).eps,
+    )
+    tri = 1.0 - (1.0 - torch.exp(accum)).clamp(0.0, 1.0).reshape(B, canvas, canvas)
+
+    ref = sr._splat_tiled(means.reshape(B, G, 2), cos_.reshape(B, G),
+                          sin_.reshape(B, G), isa.reshape(B, G), isc.reshape(B, G),
+                          op.reshape(B, G), (0, 0, canvas, canvas), T, True)
+    ref = 1.0 - ref.clamp(0.0, 1.0)
+    assert (tri - ref).abs().max().item() <= 1e-5
