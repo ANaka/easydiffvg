@@ -710,16 +710,24 @@ c[0, 20, :, 0] = torch.linspace(-0.9, 0.9, 4, device=dev)
 c[0, 21, :, 1] = 15.5 / 32.0 - 1.0
 c[0, 21, :, 0] = torch.linspace(-0.9, 0.9, 4, device=dev)
 cases.append(("border", c, torch.rand(1, 22, device=dev) * 2 + 0.5,
-              torch.rand(1, 22, device=dev), 64))
-# near-zero widths
-cases.append(("tiny-sigma", torch.rand(1, 8, 4, 2, device=dev) * 2 - 1,
-              torch.full((1, 8), 1e-6, device=dev), torch.rand(1, 8, device=dev), 64))
+              torch.rand(1, 22, device=dev), 64, True))
+# hairline widths (1e-2): full forward + grad gates
+cases.append(("hairline", torch.rand(1, 8, 4, 2, device=dev) * 2 - 1,
+              torch.full((1, 8), 1e-2, device=dev), torch.rand(1, 8, device=dev),
+              64, True))
+# degenerate widths (1e-6): forward gate + finite grads only. inv_sc2 ~ 1e8
+# makes absolute grad equality unattainable for any op-order-independent fp32
+# kernel (amendment 2026-07-06, human-approved); grad diff printed for the
+# record, not gated.
+cases.append(("degenerate-sigma", torch.rand(1, 8, 4, 2, device=dev) * 2 - 1,
+              torch.full((1, 8), 1e-6, device=dev), torch.rand(1, 8, device=dev),
+              64, False))
 # half zero opacity
 o = torch.rand(1, 20, device=dev); o[:, :10] = 0.0
 cases.append(("zero-op", torch.rand(1, 20, 4, 2, device=dev) * 2 - 1,
-              torch.rand(1, 20, device=dev) * 2 + 0.5, o, 128))
+              torch.rand(1, 20, device=dev) * 2 + 0.5, o, 128, True))
 worst_f = worst_g = 0.0
-for name, c, w, o, canvas in cases:
+for name, c, w, o, canvas, grad_gate in cases:
     c = c.clone().requires_grad_(True); w = w.clone().requires_grad_(True)
     o = o.clone().requires_grad_(True)
     d = splat_render_cubics(c, w, canvas_size=canvas, num_samples=16, opacities=o)
@@ -729,9 +737,13 @@ for name, c, w, o, canvas in cases:
     tgt = torch.rand_like(d)
     gd = torch.autograd.grad(((d - tgt) ** 2).mean(), [c, w, o], retain_graph=True)
     gt = torch.autograd.grad(((t - tgt) ** 2).mean(), [c, w, o])
+    assert all(torch.isfinite(x).all() for x in gt), f"{name}: non-finite triton grads"
     g = max((a - b).abs().max().item() for a, b in zip(gd, gt))
-    worst_f, worst_g = max(worst_f, f), max(worst_g, g)
-    print(f"{name}: fwd {f:.3g} grad {g:.3g}")
+    worst_f = max(worst_f, f)
+    if grad_gate:
+        worst_g = max(worst_g, g)
+    note = "" if grad_gate else " (grad recorded, not gated)"
+    print(f"{name}: fwd {f:.3g} grad {g:.3g}{note}")
 assert worst_f <= 1e-5 and worst_g <= 1e-5, "ADVERSARIAL GATE FAILED"
 print("adversarial gate OK")
 EOF
@@ -829,3 +841,4 @@ gh pr create --base main --title "perf(splat): Triton tile kernels (tiling=\"tri
 - Spec coverage: segments (T1), forward (T2), backward (T3), integration + adversarial gates + pixel_box/zero-pair/dtype guards (T4), benchmark + acceptance (T5), byte-identity + review + PR (T6). `tiling="auto"` intentionally unchanged (stated in T4).
 - The kernel/Function code in T2–T3 is spike-validated, not speculative; the direct-call test in T2 exists so the kernel is proven before the kwarg plumbing lands.
 - Known open question deliberately deferred: making `tiling="auto"` select triton, and tuning `BLOCK_G`/`num_warps` (T16/BLOCK_G=16 already clears the bar; tuning is optional follow-up, time-boxed to one session if attempted).
+- Amendment (2026-07-06, human-approved): near-zero-σ adversarial gate split — σ=1e-2 at full ≤1e-5 gates, σ=1e-6 at forward-≤1e-5 + finite-grads only; fp32 FMA-contraction at ~1e8 inverse variance makes absolute grad equality unattainable for any op-order-independent kernel.

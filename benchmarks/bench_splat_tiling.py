@@ -49,6 +49,7 @@ import time
 import torch
 
 import pydiffvg.splat_render as splat_mod
+from pydiffvg import splat_triton
 
 NUM_SAMPLES = 16
 EXACTNESS_TOL = 1e-5
@@ -323,6 +324,12 @@ def main():
                           {"tiling": "tiles", "tile_size": 16}))
         arm_specs.append(("tiled32", "tiled ts=32",
                           {"tiling": "tiles", "tile_size": 32}))
+        if splat_triton.triton_available():
+            arm_specs.append(("tiledtriton", "triton",
+                              {"tiling": "triton", "tile_size": 16}))
+        else:
+            print("triton path unavailable on this device (requires CUDA + "
+                  "importable triton) — skipping the triton arm")
     print()
 
     # -----------------------------------------------------------------
